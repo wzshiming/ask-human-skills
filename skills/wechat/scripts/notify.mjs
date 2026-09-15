@@ -5,7 +5,8 @@ import { CliError, formatOutgoing, loadConfig, loadState, sendText } from './_li
 async function main() {
   const { values, positionals } = parseArgs({
     options: { title: { type: 'string' }, choice: { type: 'string', multiple: true } },
-    allowPositionals: true, strict: true,
+    allowPositionals: true,
+    strict: true,
   });
   const usage = () => new CliError('wechat: usage: notify.mjs [--title T] [--choice X]... [MESSAGE]', 1);
   if (!positionals.length && process.stdin.isTTY) throw usage();

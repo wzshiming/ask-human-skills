@@ -20,7 +20,9 @@ async function main() {
     fs.rmSync(paths().lockFile, { force: true });
     saveState({ cursor: '', contextToken: '' });
     const cfg = { ...creds };
-    console.log(`Logged in (bot ${cfg.botId}). Now send the bot any message in WeChat \u2014 it appears as a new chat there.`);
+    console.log(
+      `Logged in (bot ${cfg.botId}). Now send the bot any message in WeChat \u2014 it appears as a new chat there.`,
+    );
     const first = await drain(cfg, { waitSec: 600, since: Date.now() - 60_000 });
     cfg.userId ||= first[0].from;
     saveConfig(cfg);

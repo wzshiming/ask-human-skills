@@ -95,12 +95,12 @@ lost, read the tail of `history.log`; do not ask the human to repeat.
 
 ## Failure modes
 
-| Exit | Meaning and action |
-| --- | --- |
-| `0` | Success, including an empty inbox without `--wait`. |
-| `1` | Usage error or API failure; stderr is one line starting `wechat: `. Report the error. |
-| `2` | Not configured. Ask the human to run `node scripts/setup.mjs` in their own terminal. Never request tokens in chat or read/write the config yourself. |
-| `124` | `--wait` elapsed with nothing received. Wait again or use the announced default and send a follow-up notification. |
+| Exit  | Meaning and action                                                                                                                                   |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`   | Success, including an empty inbox without `--wait`.                                                                                                  |
+| `1`   | Usage error or API failure; stderr is one line starting `wechat: `. Report the error.                                                                |
+| `2`   | Not configured. Ask the human to run `node scripts/setup.mjs` in their own terminal. Never request tokens in chat or read/write the config yourself. |
+| `124` | `--wait` elapsed with nothing received. Wait again or use the announced default and send a follow-up notification.                                   |
 
 On `wechat: bot token expired or revoked — run setup.mjs again` (exit `1`),
 ask the human to re-run setup in their own terminal.

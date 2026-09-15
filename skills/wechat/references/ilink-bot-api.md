@@ -20,16 +20,16 @@ Header: iLink-App-ClientVersion: 1
 `qrcode` is the polling handle; `qrcode_img_content` is the URL encoded into
 the displayed QR. Status polling long-polls for roughly 35 seconds.
 
-| `status` | Meaning or action |
-| --- | --- |
-| `wait` | Keep polling. |
-| `scaned` | Scanned; confirm on the phone. Spelling is part of the protocol. |
-| `confirmed` | Login complete; read the account fields below. |
-| `expired` | Fetch a new QR; this client permits three refreshes. |
-| `scaned_but_redirect` | Set the polling base to `https://<redirect_host>` when provided. |
-| `need_verifycode` | Ask for the number displayed in WeChat; send it as `verify_code`. |
-| `verify_code_blocked` | Too many wrong codes; fail and try again later. |
-| `binded_redirect` | Already bound to another client; fail and ask the human to log it out there first. |
+| `status`              | Meaning or action                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `wait`                | Keep polling.                                                                      |
+| `scaned`              | Scanned; confirm on the phone. Spelling is part of the protocol.                   |
+| `confirmed`           | Login complete; read the account fields below.                                     |
+| `expired`             | Fetch a new QR; this client permits three refreshes.                               |
+| `scaned_but_redirect` | Set the polling base to `https://<redirect_host>` when provided.                   |
+| `need_verifycode`     | Ask for the number displayed in WeChat; send it as `verify_code`.                  |
+| `verify_code_blocked` | Too many wrong codes; fail and try again later.                                    |
+| `binded_redirect`     | Already bound to another client; fail and ask the human to log it out there first. |
 
 `confirmed` carries `bot_token`, `ilink_bot_id` (format `<hex>@im.bot`),
 `baseurl` (this account's API base), and `ilink_user_id` (the scanner, format
