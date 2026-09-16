@@ -9,7 +9,8 @@ Everything in the repo is in English (docs, code, commits), regardless of the co
 ```
 skills/
 └── <channel>/
-    ├── SKILL.md          # name == folder; setup + runtime instructions for the agent
+    ├── SKILL.md          # name == folder; runtime instructions for the agent
+    ├── README.md         # for the human: requirements, install, setup walkthrough; not loaded with the skill
     ├── scripts/
     │   ├── setup.mjs     # interactive; the human runs it once
     │   ├── notify.mjs    # send a message to the human
@@ -19,7 +20,7 @@ skills/
 tests/                    # node --test; not shipped with the skills
 ```
 
-- A skill is installed by copying its `skills/<channel>/` folder alone. Never import across skills or from a repo-level module; duplicate small helpers instead.
+- A skill is installed by copying its `skills/<channel>/` folder alone — `npx skills add <owner>/<repo>@<channel>` does exactly that. Never import across skills or from a repo-level module; duplicate small helpers instead.
 - `name` is the bare channel name and must equal the folder name.
 - A channel with no reply path (desktop notifications, push-only services) ships without `inbox.mjs` and says "notify only" in its `description`.
 
@@ -50,7 +51,7 @@ Exit codes: `0` ok · `1` usage or API failure · `2` not configured (stderr say
 
 - `$ASK_HUMAN_DIR` (default `~/.config/ask-human`) holds `<channel>.json` — written by `setup.mjs` with mode `0600`, overwritten on re-run — and a state dir `<channel>/` for the read cursor, `poll.lock`, `history.log`, and whatever `notify` must record for `inbox` to quote replies.
 - Setup captures both the credential and the human's identity (chat/user/channel id) — usually by having the human message the bot — then sends a test message and, where a reply path exists, waits for the human to answer it so `inbox` is verified too. `notify` talks only to that identity and `inbox` listens only to it.
-- Only `setup.mjs` touches secrets, and the human types them into the terminal. Every SKILL.md must instruct the agent: on exit `2`, ask the human to run setup in their own terminal; never request tokens in chat, never read or write the config on the human's behalf.
+- Only `setup.mjs` touches secrets, and the human types them into the terminal. Every SKILL.md must instruct the agent: on exit `2`, ask the human to run setup in their own terminal (walkthrough in README.md); never request tokens in chat, never read or write the config on the human's behalf.
 - No real tokens, IDs or addresses anywhere in the repo, tests and examples included; use obvious placeholders.
 
 ## Receiving
@@ -71,13 +72,16 @@ description: "Ask the human a question and wait for the answer, send them a noti
 
 Quote the description (it contains colons), keep it ≤ 1024 chars and keep the "Use when:" triggers — it is all the agent sees before loading the skill. Required sections, in order:
 
-- **Setup (once, by the human)** — the command, what it prompts for, where to get the credential.
 - **Notify** — exact command; put the project or task in `--title` so the human can tell sessions apart.
 - **Ask** — the `notify` + `inbox --wait` sequence; send one self-contained question (context, options, what happens if nobody answers); what to do on `124`.
 - **Inbox** — exact command; drain after every answer and before reporting a task done.
-- **Failure modes** — every exit code, not-configured handling, rate limits, and whether one credential can serve several sessions.
+- **Failure modes** — every exit code, rate limits, and whether one credential can serve several sessions. On `2` (not configured) and on a first-time setup request: the setup command the human runs in their own terminal, pointing to README.md; never run setup or touch the config.
 
-Paths inside SKILL.md are relative to the skill folder.
+Paths inside SKILL.md are relative to the skill folder. SKILL.md carries only what the agent needs at runtime; prerequisites, install and the setup walkthrough live in README.md.
+
+## README.md
+
+For the human; not loaded with the skill. Required content: requirements (runtime, app, network access); install with `npx skills add <owner>/<repo>@<channel> -g`, with copying the skill folder into the agent's skills directory as the fallback, plus an instruction the human can paste to the agent that installs the skill and forbids running setup or touching `$ASK_HUMAN_DIR`; the setup walkthrough, worded to match what `setup.mjs` prints; the files under `$ASK_HUMAN_DIR`; parallel sessions; troubleshooting for the exit codes the human must act on. No agent instructions, no real tokens or IDs.
 
 ## Checks
 
@@ -91,6 +95,6 @@ Paths inside SKILL.md are relative to the skill folder.
 
 1. Create `skills/<channel>/` with the layout above.
 2. Implement the contract; verify escaping, splitting, `--choice`, the `re:` quote, `--wait` (including `124`) and every exit code.
-3. Write SKILL.md as specified; confirm `name` equals the folder name.
+3. Write SKILL.md and README.md as specified; confirm `name` equals the folder name.
 4. Add tests under `tests/`, run `make all`, smoke-test for real.
 5. One channel per PR. Commit subjects: `<channel>: <imperative summary>`; `repo:` for cross-cutting changes.

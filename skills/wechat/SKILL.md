@@ -1,33 +1,10 @@
 ---
 name: wechat
-description: "Ask the human a question and wait for the answer, send them a notification, or pick up messages they sent on their own, via WeChat (Weixin; ask-human-on-wechat). Use when: blocked on a decision, approval of a risky step, or information only the human has; a long task finished or failed; checking for new instructions from the human; first-time WeChat setup."
+description: "Ask the human a question and wait for the answer, send them a notification, or pick up messages they sent on their own, via WeChat (Weixin). Use when: blocked on a decision, approval of a risky step, or information only the human has; a long task finished or failed; checking for new instructions from the human; first-time WeChat setup."
 ---
 
-## Setup (once, by the human)
-
-Require Node.js >= 22, WeChat on the human's phone, and network access to
-`ilinkai.weixin.qq.com`. Resolve all commands relative to this skill folder.
-Ask the human to run this in their OWN terminal:
-
-```sh
-node scripts/setup.mjs
-```
-
-Never run setup as the agent, handle credentials, request tokens in chat, or
-read or write the config on the human's behalf.
-
-1. Setup prints a QR code in the terminal and the same link as a fallback URL if the terminal cannot render it.
-2. Scan it with WeChat and confirm on the phone. WeChat may show a number to type back into the terminal.
-3. Send the new bot chat any message. This identifies the WeChat user to contact; only that user is heard afterwards.
-4. Setup sends a test message. Reply to it to verify receiving.
-5. Setup prints the config path.
-
-There is no token to obtain: QR login creates a bot bound to the scanning
-WeChat account and stores its token in `$ASK_HUMAN_DIR/wechat.json`
-(default `~/.config/ask-human/wechat.json`, mode `0600`). Re-running setup replaces it.
-State lives in `$ASK_HUMAN_DIR/wechat/`: read cursor and latest conversation
-token (`state.json`), `poll.lock`, and `history.log`. Deleting `state.json` or
-`poll.lock` is safe; they are rebuilt on the next call.
+Commands below are relative to this skill folder; run them as `node <skill-dir>/scripts/<name>.mjs`.
+Config and state live under `$ASK_HUMAN_DIR` (default `~/.config/ask-human`).
 
 ## Notify
 
@@ -95,15 +72,19 @@ lost, read the tail of `history.log`; do not ask the human to repeat.
 
 ## Failure modes
 
-| Exit  | Meaning and action                                                                                                                                   |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0`   | Success, including an empty inbox without `--wait`.                                                                                                  |
-| `1`   | Usage error or API failure; stderr is one line starting `wechat: `. Report the error.                                                                |
-| `2`   | Not configured. Ask the human to run `node scripts/setup.mjs` in their own terminal. Never request tokens in chat or read/write the config yourself. |
-| `124` | `--wait` elapsed with nothing received. Wait again or use the announced default and send a follow-up notification.                                   |
+| Exit  | Meaning and action                                                                                                 |
+| ----- | ------------------------------------------------------------------------------------------------------------------ |
+| `0`   | Success, including an empty inbox without `--wait`.                                                                |
+| `1`   | Usage error or API failure; stderr is one line starting `wechat: `. Report the error.                              |
+| `2`   | Not configured. Ask the human to run the setup command from stderr in their own terminal; see below.               |
+| `124` | `--wait` elapsed with nothing received. Wait again or use the announced default and send a follow-up notification. |
 
-On `wechat: bot token expired or revoked — run setup.mjs again` (exit `1`),
-ask the human to re-run setup in their own terminal.
+Setup is the human's job, also when they ask for first-time setup: the command
+is `node <skill-dir>/scripts/setup.mjs`, run in their own terminal; the
+walkthrough is [README.md](README.md). Never run it yourself, handle
+credentials, request tokens in chat, or read or write the config. On
+`wechat: bot token expired or revoked — run setup.mjs again` (exit `1`), ask
+the human to re-run setup the same way.
 Rate limits and transient failures are handled inside the scripts, never by
 you: HTTP `429` is retried honoring `Retry-After`, and network or `5xx` errors
 during `--wait` are retried with backoff, both until the call's own deadline
