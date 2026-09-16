@@ -10,7 +10,7 @@ check:
 	@for f in $(SCRIPTS); do node --check "$$f" || exit 1; done
 
 test:
-	node --test tests/
+	node --test 'tests/*.test.mjs'
 
 fmt:
 	$(PRETTIER) --write .

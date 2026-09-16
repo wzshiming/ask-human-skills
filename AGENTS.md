@@ -86,7 +86,7 @@ For the human; not loaded with the skill. Required content: requirements (runtim
 ## Checks
 
 - `make check` — `node --check` on every `skills/*/scripts/*.mjs`.
-- `make test` — `node --test tests/`; mock `fetch` and point `$ASK_HUMAN_DIR` at a temp dir; tests never hit a real API or the real config.
+- `make test` — `node --test 'tests/*.test.mjs'` (a glob, not the directory: Node 22 and 24 reject a directory argument); mock `fetch` and point `$ASK_HUMAN_DIR` at a temp dir; tests never hit a real API or the real config.
 - `make fmt` / `make fmt-check` — Prettier (pinned in the Makefile, run through `npx`; nothing is installed into the repo), config in `.prettierrc`. Format before committing; CI fails on unformatted files.
 - CI (`.github/workflows/ci.yml`) runs `check` and `test` on Node 22 and the current LTS, and `fmt-check`, on every push to `master` and every pull request.
 - Before landing a channel change, smoke-test `setup`, `notify` and `inbox --wait` against your own account and note the result in the PR.
