@@ -16,9 +16,14 @@ if (!isMainThread) {
     let raw = '';
     for await (const chunk of req) raw += chunk;
     requests.push({ url: req.url, headers: req.headers, body: JSON.parse(raw) });
-    const entry = req.url === '/ilink/bot/sendmessage' ? (Array.isArray(sendResult) ? sendResult.shift() ?? { ret: 0 } : sendResult)
-      : req.url === '/ilink/bot/getupdates' ? updates.shift() ?? { msgs: [] }
-        : { ret: 1, errmsg: 'Unexpected endpoint' };
+    const entry =
+      req.url === '/ilink/bot/sendmessage'
+        ? Array.isArray(sendResult)
+          ? (sendResult.shift() ?? { ret: 0 })
+          : sendResult
+        : req.url === '/ilink/bot/getupdates'
+          ? (updates.shift() ?? { msgs: [] })
+          : { ret: 1, errmsg: 'Unexpected endpoint' };
     if (entry.hold) {
       res.on('close', () => res.end());
       return;
@@ -61,8 +66,14 @@ if (!isMainThread) {
 
   function command(value) {
     return new Promise((resolve, reject) => {
-      const onError = error => { worker.off('message', onMessage); reject(error); };
-      const onMessage = result => { worker.off('error', onError); resolve(result); };
+      const onError = error => {
+        worker.off('message', onMessage);
+        reject(error);
+      };
+      const onMessage = result => {
+        worker.off('error', onError);
+        resolve(result);
+      };
       worker.once('error', onError);
       worker.once('message', onMessage);
       if (value) worker.postMessage(value);
@@ -71,7 +82,10 @@ if (!isMainThread) {
 
   function run(script, args = [], input = '') {
     const result = spawnSync(process.execPath, [path.join(scripts, script), ...args], {
-      env: { ...process.env, ASK_HUMAN_DIR: dir }, input, encoding: 'utf8', timeout: 8000,
+      env: { ...process.env, ASK_HUMAN_DIR: dir },
+      input,
+      encoding: 'utf8',
+      timeout: 8000,
     });
     assert.ifError(result.error);
     assert.equal(result.signal, null);
@@ -97,8 +111,14 @@ if (!isMainThread) {
   const stamp = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 
   function message(text, overrides = {}) {
-    return { from_user_id: 'USER_PLACEHOLDER', message_type: 1, create_time_ms: time,
-      item_list: [{ type: 1, text_item: { text } }], context_token: 'CTX_PLACEHOLDER', ...overrides };
+    return {
+      from_user_id: 'USER_PLACEHOLDER',
+      message_type: 1,
+      create_time_ms: time,
+      item_list: [{ type: 1, text_item: { text } }],
+      context_token: 'CTX_PLACEHOLDER',
+      ...overrides,
+    };
   }
 
   function state() {
@@ -114,9 +134,15 @@ if (!isMainThread) {
     await command({ type: 'reset' });
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-cli-'));
     dirs.push(dir);
-    fs.writeFileSync(path.join(dir, 'wechat.json'), JSON.stringify({
-      token: 'TOKEN_PLACEHOLDER', baseUrl, botId: 'BOT_PLACEHOLDER', userId: 'USER_PLACEHOLDER',
-    }));
+    fs.writeFileSync(
+      path.join(dir, 'wechat.json'),
+      JSON.stringify({
+        token: 'TOKEN_PLACEHOLDER',
+        baseUrl,
+        botId: 'BOT_PLACEHOLDER',
+        userId: 'USER_PLACEHOLDER',
+      }),
+    );
   });
 
   after(async () => {
@@ -126,7 +152,10 @@ if (!isMainThread) {
 
   test('notify sends title and choices with identity, authorization, and saved context', async () => {
     fs.mkdirSync(path.join(dir, 'wechat'));
-    fs.writeFileSync(path.join(dir, 'wechat/state.json'), JSON.stringify({ cursor: 'C', contextToken: 'CTX_PLACEHOLDER' }));
+    fs.writeFileSync(
+      path.join(dir, 'wechat/state.json'),
+      JSON.stringify({ cursor: 'C', contextToken: 'CTX_PLACEHOLDER' }),
+    );
     success(run('notify.mjs', ['--title', 'T', '--choice', 'A', '--choice', 'B', 'msg']));
     const requests = await command({ type: 'requests' });
     assert.equal(requests.length, 1);
@@ -157,12 +186,14 @@ if (!isMainThread) {
   test('notify splits 5000 characters into ordered 4000 and 1000 character posts', async () => {
     success(run('notify.mjs', ['a'.repeat(4000) + 'b'.repeat(1000)]));
     const requests = await command({ type: 'requests' });
-    assert.deepEqual(requests.map(request => request.url), [
-      '/ilink/bot/sendmessage', '/ilink/bot/sendmessage',
-    ]);
-    assert.deepEqual(requests.map(request => request.body.msg.item_list[0].text_item.text), [
-      'a'.repeat(4000), 'b'.repeat(1000),
-    ]);
+    assert.deepEqual(
+      requests.map(request => request.url),
+      ['/ilink/bot/sendmessage', '/ilink/bot/sendmessage'],
+    );
+    assert.deepEqual(
+      requests.map(request => request.body.msg.item_list[0].text_item.text),
+      ['a'.repeat(4000), 'b'.repeat(1000)],
+    );
   });
 
   test('notify reports missing configuration with exit 2 and a setup hint', () => {
@@ -212,11 +243,14 @@ if (!isMainThread) {
       create_time_ms: time + 1000,
       item_list: [{ type: 1, text_item: { text: 'two' }, ref_msg: { title: 'Question line 1\nline 2' } }],
     });
-    await command({ type: 'reset', updates: [
-      { delayMs: 300, msgs: [message('one')], get_updates_buf: 'FIRST_CURSOR_PLACEHOLDER' },
-      { msgs: [quoted], get_updates_buf: 'SECOND_CURSOR_PLACEHOLDER' },
-      { delayMs: 1200, msgs: [message('three')], get_updates_buf: 'THIRD_CURSOR_PLACEHOLDER' },
-    ] });
+    await command({
+      type: 'reset',
+      updates: [
+        { delayMs: 300, msgs: [message('one')], get_updates_buf: 'FIRST_CURSOR_PLACEHOLDER' },
+        { msgs: [quoted], get_updates_buf: 'SECOND_CURSOR_PLACEHOLDER' },
+        { delayMs: 1200, msgs: [message('three')], get_updates_buf: 'THIRD_CURSOR_PLACEHOLDER' },
+      ],
+    });
     const started = Date.now();
     const expected = `[${stamp}]\none\n---\n[${stamp}] re: "Question line 1"\ntwo\n---\n[${stamp}]\nthree\n`;
     success(run('inbox.mjs', ['--wait', '5']), expected);
@@ -233,10 +267,12 @@ if (!isMainThread) {
   test('inbox releases the poll lock when terminated during a wait', async () => {
     await command({ type: 'reset', updates: [{ hold: true }] });
     const child = spawn(process.execPath, [path.join(scripts, 'inbox.mjs'), '--wait', '20'], {
-      env: { ...process.env, ASK_HUMAN_DIR: dir }, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ASK_HUMAN_DIR: dir },
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     const lockFile = path.join(dir, 'wechat/poll.lock');
-    for (let waited = 0; !fs.existsSync(lockFile) && waited < 4000; waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
+    for (let waited = 0; !fs.existsSync(lockFile) && waited < 4000; waited += 50)
+      await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(fs.existsSync(lockFile), true);
     child.kill('SIGTERM');
     const code = await new Promise(resolve => child.on('exit', resolve));
@@ -247,17 +283,23 @@ if (!isMainThread) {
   });
 
   test('rate limits are absorbed by the scripts', async () => {
-    await command({ type: 'reset',
+    await command({
+      type: 'reset',
       sendResult: [{ status: 429, headers: { 'Retry-After': '1' } }, { ret: 0 }],
-      updates: [{ status: 429, headers: { 'Retry-After': '1' } }, { msgs: [message('later')], get_updates_buf: 'LATER_CURSOR_PLACEHOLDER' }] });
+      updates: [
+        { status: 429, headers: { 'Retry-After': '1' } },
+        { msgs: [message('later')], get_updates_buf: 'LATER_CURSOR_PLACEHOLDER' },
+      ],
+    });
     const started = Date.now();
     success(run('notify.mjs', ['hello']));
     success(run('inbox.mjs'), `[${stamp}]\nlater\n`);
     assert.ok(Date.now() - started >= 2000);
     const requests = await command({ type: 'requests' });
-    assert.deepEqual(requests.map(request => request.url), [
-      '/ilink/bot/sendmessage', '/ilink/bot/sendmessage', '/ilink/bot/getupdates', '/ilink/bot/getupdates',
-    ]);
+    assert.deepEqual(
+      requests.map(request => request.url),
+      ['/ilink/bot/sendmessage', '/ilink/bot/sendmessage', '/ilink/bot/getupdates', '/ilink/bot/getupdates'],
+    );
   });
 
   test('inbox rejects invalid waits and positional arguments', () => {
@@ -285,10 +327,12 @@ if (!isMainThread) {
   });
 
   test('inbox ignores other senders and bot echoes', async () => {
-    await command({ type: 'reset', updates: [{ msgs: [
-      message('other', { from_user_id: 'OTHER_PLACEHOLDER' }),
-      message('echo', { message_type: 2 }),
-    ] }] });
+    await command({
+      type: 'reset',
+      updates: [
+        { msgs: [message('other', { from_user_id: 'OTHER_PLACEHOLDER' }), message('echo', { message_type: 2 })] },
+      ],
+    });
     success(run('inbox.mjs'));
     assert.equal(state().contextToken, '');
   });
@@ -296,7 +340,9 @@ if (!isMainThread) {
   test('setup passes syntax checking', () => {
     // QR login uses a fixed public host, so setup is not run end-to-end here.
     const result = spawnSync(process.execPath, ['--check', path.join(scripts, 'setup.mjs')], {
-      env: { ...process.env, ASK_HUMAN_DIR: dir }, encoding: 'utf8', timeout: 8000,
+      env: { ...process.env, ASK_HUMAN_DIR: dir },
+      encoding: 'utf8',
+      timeout: 8000,
     });
     assert.ifError(result.error);
     success(result);

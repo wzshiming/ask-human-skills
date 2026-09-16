@@ -11,7 +11,8 @@ let tempDir;
 let calls;
 let responses;
 const response = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
-const isError = (code, pattern) => error => error instanceof lib.CliError && error.exitCode === code && pattern.test(error.message);
+const isError = (code, pattern) => error =>
+  error instanceof lib.CliError && error.exitCode === code && pattern.test(error.message);
 
 beforeEach(() => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-lib-test-'));
@@ -37,15 +38,26 @@ afterEach(() => {
 test('config and state use dynamic paths, secure atomic writes, and safe defaults', () => {
   assert.deepEqual(lib.EXIT, { OK: 0, FAIL: 1, NOT_CONFIGURED: 2, TIMEOUT: 124 });
   assert.equal(lib.CHUNK_LIMIT, 4000);
-  assert.equal(lib.SETUP_SCRIPT, path.resolve(path.dirname(new URL('../skills/wechat/scripts/_lib.mjs', import.meta.url).pathname), 'setup.mjs'));
+  assert.equal(
+    lib.SETUP_SCRIPT,
+    path.resolve(path.dirname(new URL('../skills/wechat/scripts/_lib.mjs', import.meta.url).pathname), 'setup.mjs'),
+  );
   assert.deepEqual(lib.paths(), {
-    dir: tempDir, configFile: path.join(tempDir, 'wechat.json'),
-    stateDir: path.join(tempDir, 'wechat'), stateFile: path.join(tempDir, 'wechat/state.json'),
-    lockFile: path.join(tempDir, 'wechat/poll.lock'), historyFile: path.join(tempDir, 'wechat/history.log'),
+    dir: tempDir,
+    configFile: path.join(tempDir, 'wechat.json'),
+    stateDir: path.join(tempDir, 'wechat'),
+    stateFile: path.join(tempDir, 'wechat/state.json'),
+    lockFile: path.join(tempDir, 'wechat/poll.lock'),
+    historyFile: path.join(tempDir, 'wechat/history.log'),
   });
   assert.throws(() => lib.loadConfig(), isError(2, /setup\.mjs/));
   assert.deepEqual(lib.loadState(), { cursor: '', contextToken: '' });
-  const config = { token: 'TOKEN_PLACEHOLDER', baseUrl: 'https://example.invalid', userId: 'USER_PLACEHOLDER', botId: 'BOT_PLACEHOLDER' };
+  const config = {
+    token: 'TOKEN_PLACEHOLDER',
+    baseUrl: 'https://example.invalid',
+    userId: 'USER_PLACEHOLDER',
+    botId: 'BOT_PLACEHOLDER',
+  };
   lib.saveConfig(config);
   assert.deepEqual(lib.loadConfig(), config);
   assert.equal(fs.statSync(lib.paths().configFile).mode & 0o777, 0o600);
@@ -73,8 +85,11 @@ test('config and state use dynamic paths, secure atomic writes, and safe default
 
 const cfg = { token: 'TOKEN_PLACEHOLDER', baseUrl: 'https://example.invalid/account', userId: 'USER_PLACEHOLDER' };
 const incoming = (text, extra = {}) => ({
-  from_user_id: cfg.userId, message_type: 1, create_time_ms: 1000,
-  item_list: [{ type: 1, text_item: { text } }], ...extra,
+  from_user_id: cfg.userId,
+  message_type: 1,
+  create_time_ms: 1000,
+  item_list: [{ type: 1, text_item: { text } }],
+  ...extra,
 });
 
 test('headers use the four required fields and a base64 decimal uint32', () => {
@@ -90,14 +105,20 @@ test('headers use the four required fields and a base64 decimal uint32', () => {
 
 test('apiPost sends JSON to a trailing-slash base and apiGet handles status errors', async () => {
   responses.push(response({ ret: 0 }));
-  assert.deepEqual(await lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', { msg: 'PLACEHOLDER' }, { token: cfg.token }), { ret: 0 });
+  assert.deepEqual(
+    await lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', { msg: 'PLACEHOLDER' }, { token: cfg.token }),
+    { ret: 0 },
+  );
   assert.equal(calls[0].url, 'https://example.invalid/account/ilink/bot/sendmessage');
   assert.equal(calls[0].method, 'POST');
   assert.deepEqual(JSON.parse(calls[0].body), { msg: 'PLACEHOLDER' });
   assert.equal(calls[0].headers.Authorization, `Bearer ${cfg.token}`);
   for (const scripted of [response({ ret: -14 }), response({ errcode: -14 }), response({}, 401)]) {
     responses.push(scripted);
-    await assert.rejects(lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), isError(1, /setup\.mjs/));
+    await assert.rejects(
+      lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }),
+      isError(1, /setup\.mjs/),
+    );
   }
   responses.push(response({}, 429, { 'Retry-After': '0' }), response({ ret: 0 }));
   assert.deepEqual(await lib.apiGet('https://example.invalid/retry'), { ret: 0 });
@@ -111,9 +132,17 @@ test('apiPost sends JSON to a trailing-slash base and apiGet handles status erro
   }
   const before = calls.length;
   responses.push(response({}, 429, { 'Retry-After': '1' }));
-  await assert.rejects(lib.apiGet('https://example.invalid/limited', { deadline: Date.now() + 500 }), isError(1, /HTTP 429/));
+  await assert.rejects(
+    lib.apiGet('https://example.invalid/limited', { deadline: Date.now() + 500 }),
+    isError(1, /HTTP 429/),
+  );
   assert.equal(calls.length - before, 1);
-  responses.push(response({}, 429, { 'Retry-After': '0' }), response({}, 429), response({}, 429, { 'Retry-After': '0' }), response({ ret: 0 }));
+  responses.push(
+    response({}, 429, { 'Retry-After': '0' }),
+    response({}, 429),
+    response({}, 429, { 'Retry-After': '0' }),
+    response({ ret: 0 }),
+  );
   const started = Date.now();
   assert.deepEqual(await lib.apiGet('https://example.invalid/limited'), { ret: 0 });
   assert.ok(Date.now() - started >= 1900, 'missing Retry-After defaults to 2 s');
@@ -135,14 +164,26 @@ test('apiPost handles rate limiting and preserves AbortError including actual ti
   await lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token });
   assert.equal(calls.length, 2);
   assert.notEqual(calls[0].headers['X-WECHAT-UIN'], calls[1].headers['X-WECHAT-UIN']);
-  for (const [scripted, pattern] of [[response({}, 500), /HTTP 500/], [response({ ret: 5 }), /ret=5/]]) {
+  for (const [scripted, pattern] of [
+    [response({}, 500), /HTTP 500/],
+    [response({ ret: 5 }), /ret=5/],
+  ]) {
     responses.push(scripted);
-    await assert.rejects(lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), isError(1, pattern));
+    await assert.rejects(
+      lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }),
+      isError(1, pattern),
+    );
   }
   const aborted = new DOMException('Request aborted', 'AbortError');
   responses.push(aborted);
-  await assert.rejects(lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), error => error === aborted);
-  responses.push((_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })));
+  await assert.rejects(
+    lib.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }),
+    error => error === aborted,
+  );
+  responses.push(
+    (_url, { signal }) =>
+      new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })),
+  );
   await assert.rejects(lib.apiGet('https://example.invalid/timeout', { timeoutMs: 5 }), { name: 'AbortError' });
 });
 
@@ -155,7 +196,9 @@ test('withLock waits for a foreign lock and releases after success', async () =>
     assert.equal(await lib.withLock(() => 42), 42);
     assert.ok(Date.now() - started >= 190);
     assert.equal(fs.existsSync(lib.paths().lockFile), false);
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test('withLock takes over stale locks, times out on fresh locks, and releases on failure', async () => {
@@ -166,10 +209,18 @@ test('withLock takes over stale locks, times out on fresh locks, and releases on
   const started = Date.now();
   assert.equal(await lib.withLock(() => 'acquired'), 'acquired');
   assert.ok(Date.now() - started < 200);
-  await assert.rejects(lib.withLock(() => { throw new Error('callback\nfailed'); }), isError(1, /callback failed/));
+  await assert.rejects(
+    lib.withLock(() => {
+      throw new Error('callback\nfailed');
+    }),
+    isError(1, /callback failed/),
+  );
   assert.equal(fs.existsSync(lib.paths().lockFile), false);
   fs.writeFileSync(lib.paths().lockFile, 'FRESH_LOCK');
-  await assert.rejects(lib.withLock(() => assert.fail('Lock must not be acquired'), { deadline: Date.now() + 300 }), isError(124, /poll lock/));
+  await assert.rejects(
+    lib.withLock(() => assert.fail('Lock must not be acquired'), { deadline: Date.now() + 300 }),
+    isError(124, /poll lock/),
+  );
   assert.equal(fs.existsSync(lib.paths().lockFile), true);
 });
 
@@ -187,7 +238,10 @@ test('withLock refreshes its heartbeat and removes the timer on release', async 
 });
 
 test('formatOutgoing preserves plain text and adds title and numbered choices', () => {
-  assert.equal(lib.formatOutgoing({ title: 'Task', message: '* _ [ ] < > &', choices: ['Yes', 'No'] }), 'Task\n* _ [ ] < > &\n\n1. Yes\n2. No');
+  assert.equal(
+    lib.formatOutgoing({ title: 'Task', message: '* _ [ ] < > &', choices: ['Yes', 'No'] }),
+    'Task\n* _ [ ] < > &\n\n1. Yes\n2. No',
+  );
   assert.equal(lib.formatOutgoing({ message: 'Message  \n' }), 'Message');
   assert.equal(lib.formatOutgoing({}), '');
 });
@@ -211,14 +265,29 @@ test('splitText preserves ordering, prefers newlines, and never splits surrogate
 });
 
 test('humanMessages filters echoes and senders, extracts voice text and reply context', () => {
-  const voice = incoming('', { context_token: 'CONTEXT_PLACEHOLDER', item_list: [
-    { type: 2 }, { type: 1, text_item: { text: 'Caption' }, ref_msg: { title: 'Quoted\nsecond line' } },
-    { type: 3, voice_item: { text: 'Transcript' } },
-  ] });
-  const messages = [incoming('echo', { message_type: 2 }), incoming('stranger', { from_user_id: 'OTHER_USER_PLACEHOLDER' }), incoming('', { item_list: [{ type: 2 }] }), voice];
-  assert.deepEqual(lib.humanMessages(messages, cfg.userId), [{ time: 1000, from: cfg.userId, text: 'Caption\nTranscript', re: 'Quoted', contextToken: 'CONTEXT_PLACEHOLDER' }]);
+  const voice = incoming('', {
+    context_token: 'CONTEXT_PLACEHOLDER',
+    item_list: [
+      { type: 2 },
+      { type: 1, text_item: { text: 'Caption' }, ref_msg: { title: 'Quoted\nsecond line' } },
+      { type: 3, voice_item: { text: 'Transcript' } },
+    ],
+  });
+  const messages = [
+    incoming('echo', { message_type: 2 }),
+    incoming('stranger', { from_user_id: 'OTHER_USER_PLACEHOLDER' }),
+    incoming('', { item_list: [{ type: 2 }] }),
+    voice,
+  ];
+  assert.deepEqual(lib.humanMessages(messages, cfg.userId), [
+    { time: 1000, from: cfg.userId, text: 'Caption\nTranscript', re: 'Quoted', contextToken: 'CONTEXT_PLACEHOLDER' },
+  ]);
   assert.equal(lib.humanMessages(messages, '').length, 2);
-  const fallback = incoming('Answer', { item_list: [{ text_item: { text: 'Answer' }, ref_msg: { message_item: { text_item: { text: 'Fallback\nquote' } } } }] });
+  const fallback = incoming('Answer', {
+    item_list: [
+      { text_item: { text: 'Answer' }, ref_msg: { message_item: { text_item: { text: 'Fallback\nquote' } } } },
+    ],
+  });
   assert.equal(lib.humanMessages([fallback], cfg.userId)[0].re, 'Fallback');
 });
 
@@ -227,7 +296,13 @@ test('formatInbox uses local minute timestamps, optional quotes, and trailing ne
   const date = new Date(time);
   const pad = number => String(number).padStart(2, '0');
   const stamp = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  assert.equal(lib.formatInbox([{ time, text: 'First', re: 'Question' }, { time, text: 'Second', re: '' }]), `[${stamp}] re: "Question"\nFirst\n---\n[${stamp}]\nSecond\n`);
+  assert.equal(
+    lib.formatInbox([
+      { time, text: 'First', re: 'Question' },
+      { time, text: 'Second', re: '' },
+    ]),
+    `[${stamp}] re: "Question"\nFirst\n---\n[${stamp}]\nSecond\n`,
+  );
   assert.equal(lib.formatInbox([]), '');
 });
 
@@ -236,7 +311,10 @@ test('sendText posts chunks sequentially and includes context only when known', 
   await lib.sendText(cfg, 'x'.repeat(5000), { contextToken: 'CONTEXT_PLACEHOLDER' });
   await lib.sendText(cfg, 'No context');
   const sent = calls.map(call => JSON.parse(call.body).msg);
-  assert.deepEqual(sent.map(msg => msg.item_list[0].text_item.text), ['x'.repeat(4000), 'x'.repeat(1000), 'No context']);
+  assert.deepEqual(
+    sent.map(msg => msg.item_list[0].text_item.text),
+    ['x'.repeat(4000), 'x'.repeat(1000), 'No context'],
+  );
   for (const msg of sent) {
     assert.equal(msg.from_user_id, '');
     assert.equal(msg.to_user_id, cfg.userId);
@@ -260,48 +338,99 @@ test('fetchUpdates sends cursor, preserves it on empty response and on AbortErro
 });
 
 test('drain no-wait returns pending messages and persists cursor and context', async () => {
-  responses.push(response({ msgs: [incoming('Pending', { context_token: 'CONTEXT_PLACEHOLDER' })], get_updates_buf: 'NEXT_CURSOR_PLACEHOLDER' }));
+  responses.push(
+    response({
+      msgs: [incoming('Pending', { context_token: 'CONTEXT_PLACEHOLDER' })],
+      get_updates_buf: 'NEXT_CURSOR_PLACEHOLDER',
+    }),
+  );
   assert.equal((await lib.drain(cfg))[0].text, 'Pending');
   assert.equal(calls.length, 1);
   assert.deepEqual(lib.loadState(), { cursor: 'NEXT_CURSOR_PLACEHOLDER', contextToken: 'CONTEXT_PLACEHOLDER' });
   responses.push(new DOMException('aborted', 'AbortError'));
   assert.deepEqual(await lib.drain(cfg), []);
   assert.deepEqual(lib.loadState(), { cursor: 'NEXT_CURSOR_PLACEHOLDER', contextToken: 'CONTEXT_PLACEHOLDER' });
-  responses.push(response({ msgs: [incoming('Old'), incoming('New', { create_time_ms: 2000 })], get_updates_buf: 'FILTERED_CURSOR_PLACEHOLDER' }));
-  assert.deepEqual((await lib.drain(cfg, { since: 1500 })).map(item => item.text), ['New']);
+  responses.push(
+    response({
+      msgs: [incoming('Old'), incoming('New', { create_time_ms: 2000 })],
+      get_updates_buf: 'FILTERED_CURSOR_PLACEHOLDER',
+    }),
+  );
+  assert.deepEqual(
+    (await lib.drain(cfg, { since: 1500 })).map(item => item.text),
+    ['New'],
+  );
   assert.equal(lib.loadState().contextToken, 'CONTEXT_PLACEHOLDER');
 });
 
 test('drain wait throttles fast empty polls then collects a two-second grace window', async context => {
   context.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
-  responses.push(response({ msgs: [], get_updates_buf: 'EMPTY_CURSOR_PLACEHOLDER' }),
+  responses.push(
+    response({ msgs: [], get_updates_buf: 'EMPTY_CURSOR_PLACEHOLDER' }),
     () => {
       assert.equal(lib.loadState().cursor, 'EMPTY_CURSOR_PLACEHOLDER');
-      return response({ msgs: [incoming('First', { context_token: 'FIRST_CONTEXT_PLACEHOLDER' })], get_updates_buf: 'FIRST_CURSOR_PLACEHOLDER' });
+      return response({
+        msgs: [incoming('First', { context_token: 'FIRST_CONTEXT_PLACEHOLDER' })],
+        get_updates_buf: 'FIRST_CURSOR_PLACEHOLDER',
+      });
     },
-    response({ msgs: [incoming('Second', { context_token: 'SECOND_CONTEXT_PLACEHOLDER' })], get_updates_buf: 'SECOND_CURSOR_PLACEHOLDER' }),
-    ...Array.from({ length: 4 }, () => response({ msgs: [] })));
+    response({
+      msgs: [incoming('Second', { context_token: 'SECOND_CONTEXT_PLACEHOLDER' })],
+      get_updates_buf: 'SECOND_CURSOR_PLACEHOLDER',
+    }),
+    ...Array.from({ length: 4 }, () => response({ msgs: [] })),
+  );
   const handed = [];
-  const pending = lib.drain(cfg, { waitSec: 10, onItems: items => { handed.push(items.map(item => item.text)); } });
+  const pending = lib.drain(cfg, {
+    waitSec: 10,
+    onItems: items => {
+      handed.push(items.map(item => item.text));
+    },
+  });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls.length, 1);
   for (let index = 0; index < 4; index++) {
     context.mock.timers.tick(1000);
     await new Promise(resolve => setImmediate(resolve));
   }
-  assert.deepEqual((await pending).map(item => item.text), ['First', 'Second']);
+  assert.deepEqual(
+    (await pending).map(item => item.text),
+    ['First', 'Second'],
+  );
   assert.deepEqual(handed, [['First'], ['Second']]);
   assert.ok(calls.length >= 4 && calls.length <= 6, `polls ${calls.length}`);
-  assert.deepEqual(calls.slice(0, 4).map(call => JSON.parse(call.body).get_updates_buf),
-    ['', 'EMPTY_CURSOR_PLACEHOLDER', 'FIRST_CURSOR_PLACEHOLDER', 'SECOND_CURSOR_PLACEHOLDER']);
-  assert.deepEqual(lib.loadState(), { cursor: 'SECOND_CURSOR_PLACEHOLDER', contextToken: 'SECOND_CONTEXT_PLACEHOLDER' });
-  assert.equal(fs.readFileSync(lib.paths().historyFile, 'utf8'), lib.formatInbox(lib.humanMessages([incoming('First')], cfg.userId)) + '---\n' + lib.formatInbox(lib.humanMessages([incoming('Second')], cfg.userId)));
+  assert.deepEqual(
+    calls.slice(0, 4).map(call => JSON.parse(call.body).get_updates_buf),
+    ['', 'EMPTY_CURSOR_PLACEHOLDER', 'FIRST_CURSOR_PLACEHOLDER', 'SECOND_CURSOR_PLACEHOLDER'],
+  );
+  assert.deepEqual(lib.loadState(), {
+    cursor: 'SECOND_CURSOR_PLACEHOLDER',
+    contextToken: 'SECOND_CONTEXT_PLACEHOLDER',
+  });
+  assert.equal(
+    fs.readFileSync(lib.paths().historyFile, 'utf8'),
+    lib.formatInbox(lib.humanMessages([incoming('First')], cfg.userId)) +
+      '---\n' +
+      lib.formatInbox(lib.humanMessages([incoming('Second')], cfg.userId)),
+  );
 });
 
 test('drain hands messages over before advancing the cursor', async () => {
   lib.saveState({ cursor: 'OLD_CURSOR_PLACEHOLDER', contextToken: '' });
-  responses.push(response({ msgs: [incoming('Handed', { context_token: 'CONTEXT_PLACEHOLDER' })], get_updates_buf: 'NEW_CURSOR_PLACEHOLDER' }));
-  await assert.rejects(lib.drain(cfg, { onItems: () => { throw new Error('stdout closed'); } }), isError(1, /stdout closed/));
+  responses.push(
+    response({
+      msgs: [incoming('Handed', { context_token: 'CONTEXT_PLACEHOLDER' })],
+      get_updates_buf: 'NEW_CURSOR_PLACEHOLDER',
+    }),
+  );
+  await assert.rejects(
+    lib.drain(cfg, {
+      onItems: () => {
+        throw new Error('stdout closed');
+      },
+    }),
+    isError(1, /stdout closed/),
+  );
   assert.deepEqual(lib.loadState(), { cursor: 'OLD_CURSOR_PLACEHOLDER', contextToken: '' });
   assert.match(fs.readFileSync(lib.paths().historyFile, 'utf8'), /\nHanded\n$/);
   assert.equal(fs.existsSync(lib.paths().lockFile), false);
@@ -330,7 +459,12 @@ test('drain wait expires without spinning on fast empty polls', async () => {
 
 test('drain backs off transient errors and preserves token-expiry failures', async context => {
   context.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
-  responses.push(response({}, 500), response({}, 502), response({ msgs: [incoming('Recovered')] }), ...Array.from({ length: 3 }, () => response({ msgs: [] })));
+  responses.push(
+    response({}, 500),
+    response({}, 502),
+    response({ msgs: [incoming('Recovered')] }),
+    ...Array.from({ length: 3 }, () => response({ msgs: [] })),
+  );
   const pending = lib.drain(cfg, { waitSec: 10 });
   await new Promise(resolve => setImmediate(resolve));
   context.mock.timers.tick(1999);
@@ -360,20 +494,44 @@ test('drain rethrows last error when no poll succeeded before deadline', async c
 });
 
 test('drain preserves collected messages when its single grace poll fails transiently', async () => {
-  responses.push(response({ msgs: [incoming('Collected', { context_token: 'CONTEXT_PLACEHOLDER' })], get_updates_buf: 'CURSOR_PLACEHOLDER' }), response({}, 500));
+  responses.push(
+    response({
+      msgs: [incoming('Collected', { context_token: 'CONTEXT_PLACEHOLDER' })],
+      get_updates_buf: 'CURSOR_PLACEHOLDER',
+    }),
+    response({}, 500),
+  );
   assert.equal((await lib.drain(cfg, { waitSec: 10 }))[0].text, 'Collected');
   assert.equal(calls.length, 2);
   assert.deepEqual(lib.loadState(), { cursor: 'CURSOR_PLACEHOLDER', contextToken: 'CONTEXT_PLACEHOLDER' });
 });
 
 const qr = () => response({ qrcode: 'QR_HANDLE_PLACEHOLDER +&', qrcode_img_content: 'https://example.invalid/scan' });
-const confirmed = () => response({ status: 'confirmed', bot_token: 'TOKEN_PLACEHOLDER', ilink_bot_id: 'BOT_PLACEHOLDER', baseurl: 'https://example.invalid/account', ilink_user_id: 'USER_PLACEHOLDER' });
+const confirmed = () =>
+  response({
+    status: 'confirmed',
+    bot_token: 'TOKEN_PLACEHOLDER',
+    ilink_bot_id: 'BOT_PLACEHOLDER',
+    baseurl: 'https://example.invalid/account',
+    ilink_user_id: 'USER_PLACEHOLDER',
+  });
 
 test('login waits, reports scan once, and returns the confirmed account', async () => {
-  responses.push(qr(), response({ status: 'wait' }), response({ status: 'scaned' }), response({ status: 'scaned' }), confirmed());
+  responses.push(
+    qr(),
+    response({ status: 'wait' }),
+    response({ status: 'scaned' }),
+    response({ status: 'scaned' }),
+    confirmed(),
+  );
   const output = [];
   const urls = [];
-  const result = await lib.login({ out: line => output.push(line), ask: () => assert.fail('Unexpected question'), onQr: url => urls.push(url), pollIntervalMs: 0 });
+  const result = await lib.login({
+    out: line => output.push(line),
+    ask: () => assert.fail('Unexpected question'),
+    onQr: url => urls.push(url),
+    pollIntervalMs: 0,
+  });
   assert.deepEqual(result, { ...cfg, botId: 'BOT_PLACEHOLDER' });
   assert.deepEqual(urls, ['https://example.invalid/scan']);
   assert.deepEqual(output, ['Scanned — confirm on your phone.']);
@@ -385,12 +543,27 @@ test('login waits, reports scan once, and returns the confirmed account', async 
 });
 
 test('login refreshes expired QR and handles verification, redirect, and accepted code', async () => {
-  responses.push(qr(), response({ status: 'expired' }), qr(),
+  responses.push(
+    qr(),
+    response({ status: 'expired' }),
+    qr(),
     response({ status: 'scaned_but_redirect', redirect_host: 'redirect.example.invalid' }),
-    response({ status: 'need_verifycode' }), response({ status: 'wait' }), response({ status: 'scaned' }), confirmed());
+    response({ status: 'need_verifycode' }),
+    response({ status: 'wait' }),
+    response({ status: 'scaned' }),
+    confirmed(),
+  );
   const urls = [];
   const questions = [];
-  await lib.login({ out: () => {}, onQr: url => urls.push(url), ask: async question => { questions.push(question); return 'CODE_PLACEHOLDER +&'; }, pollIntervalMs: 0 });
+  await lib.login({
+    out: () => {},
+    onQr: url => urls.push(url),
+    ask: async question => {
+      questions.push(question);
+      return 'CODE_PLACEHOLDER +&';
+    },
+    pollIntervalMs: 0,
+  });
   assert.equal(urls.length, 2);
   assert.deepEqual(questions, ['Enter the number shown in WeChat: ']);
   assert.ok(calls[4].url.startsWith('https://redirect.example.invalid/'));
@@ -400,10 +573,20 @@ test('login refreshes expired QR and handles verification, redirect, and accepte
 });
 
 test('login retries polling network errors, AbortError and gateway 5xx, but fails other API errors', async () => {
-  responses.push(qr(), new TypeError('Network unavailable'), new DOMException('aborted', 'AbortError'), response({}, 502),
-    response({ status: 'confirmed', bot_token: 'TOKEN_PLACEHOLDER', ilink_bot_id: 'BOT_PLACEHOLDER' }));
+  responses.push(
+    qr(),
+    new TypeError('Network unavailable'),
+    new DOMException('aborted', 'AbortError'),
+    response({}, 502),
+    response({ status: 'confirmed', bot_token: 'TOKEN_PLACEHOLDER', ilink_bot_id: 'BOT_PLACEHOLDER' }),
+  );
   const options = { out: () => {}, ask: async () => '', onQr: () => {}, pollIntervalMs: 0 };
-  assert.deepEqual(await lib.login(options), { token: 'TOKEN_PLACEHOLDER', botId: 'BOT_PLACEHOLDER', baseUrl: 'https://ilinkai.weixin.qq.com', userId: '' });
+  assert.deepEqual(await lib.login(options), {
+    token: 'TOKEN_PLACEHOLDER',
+    botId: 'BOT_PLACEHOLDER',
+    baseUrl: 'https://ilinkai.weixin.qq.com',
+    userId: '',
+  });
   responses.push(qr(), response({}, 404));
   await assert.rejects(lib.login(options), isError(1, /HTTP 404/));
   responses.push(qr(), response({ ret: 7 }));
@@ -412,7 +595,11 @@ test('login retries polling network errors, AbortError and gateway 5xx, but fail
 
 test('login rejects blocked codes, bound bots, incomplete confirmation, and exhausted refreshes', async () => {
   const options = { out: () => {}, ask: async () => '', onQr: () => {}, pollIntervalMs: 0 };
-  for (const [status, pattern] of [['verify_code_blocked', /too many wrong codes/], ['binded_redirect', /already bound/], ['confirmed', /confirm/]]) {
+  for (const [status, pattern] of [
+    ['verify_code_blocked', /too many wrong codes/],
+    ['binded_redirect', /already bound/],
+    ['confirmed', /confirm/],
+  ]) {
     responses.push(qr(), response({ status }));
     await assert.rejects(lib.login(options), isError(1, pattern));
   }
@@ -428,5 +615,8 @@ test('login enforces its eight-minute deadline', async context => {
     context.mock.timers.tick(8 * 60 * 1000);
     return response({ status: 'wait' });
   });
-  await assert.rejects(lib.login({ out: () => {}, ask: async () => '', onQr: () => {}, pollIntervalMs: 0 }), isError(1, /login timed out/));
+  await assert.rejects(
+    lib.login({ out: () => {}, ask: async () => '', onQr: () => {}, pollIntervalMs: 0 }),
+    isError(1, /login timed out/),
+  );
 });

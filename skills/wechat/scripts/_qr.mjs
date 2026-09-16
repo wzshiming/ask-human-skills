@@ -1,14 +1,10 @@
 const EC_PER_BLOCK = [
-  7, 10, 15, 20, 26, 18, 20, 24, 30, 18,
-  20, 24, 26, 30, 22, 24, 28, 30, 28, 28,
-  28, 28, 30, 30, 26, 28, 30, 30, 30, 30,
+  7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30,
   30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
 ];
 const BLOCK_COUNT = [
-  1, 1, 1, 1, 1, 2, 2, 2, 2, 4,
-  4, 4, 4, 4, 6, 6, 6, 6, 7, 8,
-  8, 9, 9, 10, 12, 12, 12, 13, 14, 15,
-  16, 17, 18, 19, 19, 20, 21, 22, 24, 25,
+  1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19,
+  20, 21, 22, 24, 25,
 ];
 
 function totalCodewords(version) {
@@ -55,7 +51,7 @@ function interleave(data, version) {
   const count = BLOCK_COUNT[version - 1];
   const degree = EC_PER_BLOCK[version - 1];
   const shortLength = Math.floor(data.length / count);
-  const shortCount = count - data.length % count;
+  const shortCount = count - (data.length % count);
   const generator = generatorPolynomial(degree);
   const blocks = [];
   const corrections = [];
@@ -131,7 +127,11 @@ function bch(value, shift, polynomial) {
 }
 
 function drawPatterns(version, size, set) {
-  for (const [top, left] of [[0, 0], [0, size - 7], [size - 7, 0]]) {
+  for (const [top, left] of [
+    [0, 0],
+    [0, size - 7],
+    [size - 7, 0],
+  ]) {
     for (let row = -1; row <= 7; row++) {
       for (let col = -1; col <= 7; col++) {
         const inside = row >= 0 && row <= 6 && col >= 0 && col <= 6;
@@ -172,7 +172,7 @@ function drawPatterns(version, size, set) {
     const information = bch(version, 12, 0x1f25);
     for (let index = 0; index < 18; index++) {
       const row = Math.floor(index / 3);
-      const col = size - 11 + index % 3;
+      const col = size - 11 + (index % 3);
       const bit = (information >>> index) & 1;
       set(row, col, bit);
       set(col, row, bit);
@@ -210,7 +210,7 @@ export function qrMatrix(text) {
         const col = right - side;
         if (reserved[row][col]) continue;
         const byte = codewords[Math.floor(bitIndex / 8)] ?? 0;
-        const bit = (byte >>> (7 - bitIndex % 8)) & 1;
+        const bit = (byte >>> (7 - (bitIndex % 8))) & 1;
         matrix[row][col] = bit ^ Number((row + col) % 2 === 0);
         bitIndex++;
       }

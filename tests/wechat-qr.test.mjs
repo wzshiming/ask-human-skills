@@ -6,7 +6,8 @@ const { qrMatrix, renderQr } = await import(new URL('../skills/wechat/scripts/_q
 // Generated: mkdir -p /tmp/qrfix && cd /tmp/qrfix && npm init -y >/dev/null && npm i qrcode@1 --silent && node gen.mjs > fixtures.jsonl (byte mode, L, mask 0).
 const fixtures = [
   {
-    text: 'hello', version: 1,
+    text: 'hello',
+    version: 1,
     rows: [
       '111111100101101111111',
       '100000100111001000001',
@@ -144,7 +145,10 @@ for (const fixture of fixtures) {
     const matrix = qrMatrix(fixture.text);
     assert.equal(matrix.length, 17 + 4 * fixture.version);
     assert.ok(matrix.every(row => row.every(value => value === 0 || value === 1)));
-    assert.deepEqual(matrix.map(row => row.join('')), fixture.rows);
+    assert.deepEqual(
+      matrix.map(row => row.join('')),
+      fixture.rows,
+    );
   });
 }
 
@@ -153,8 +157,15 @@ test('finder cores, timing patterns, and dark module', () => {
   const matrix = qrMatrix(text);
   const size = 17 + 4 * version;
   const finder = ['1111111', '1000001', '1011101', '1011101', '1011101', '1000001', '1111111'];
-  for (const [top, left] of [[0, 0], [0, size - 7], [size - 7, 0]]) {
-    assert.deepEqual(matrix.slice(top, top + 7).map(row => row.slice(left, left + 7).join('')), finder);
+  for (const [top, left] of [
+    [0, 0],
+    [0, size - 7],
+    [size - 7, 0],
+  ]) {
+    assert.deepEqual(
+      matrix.slice(top, top + 7).map(row => row.slice(left, left + 7).join('')),
+      finder,
+    );
   }
   assert.equal(matrix[4 * version + 9][8], 1);
   for (let index = 8; index < size - 8; index++) {
