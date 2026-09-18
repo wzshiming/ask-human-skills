@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { parseArgs } from 'node:util';
-import { CliError, formatOutgoing, loadConfig, loadState, sendText } from './_lib.mjs';
+import { CliError, formatOutgoing, loadConfig, loadState, registerSession, sendText, sessions } from './_lib.mjs';
 
 async function main() {
   const { values, positionals } = parseArgs({
@@ -11,9 +11,12 @@ async function main() {
   const usage = () => new CliError('wechat: usage: notify.mjs [--title T] [--choice X]... [MESSAGE]', 1);
   if (!positionals.length && process.stdin.isTTY) throw usage();
   const message = positionals.length ? positionals.join(' ') : fs.readFileSync(0, 'utf8');
-  const text = formatOutgoing({ title: values.title, message, choices: values.choice });
+  let text = formatOutgoing({ title: values.title, message, choices: values.choice });
   if (!text.trim()) throw usage();
   const cfg = loadConfig();
+  const key = registerSession(values.title ?? '');
+  if (sessions().some(session => session.since && session.key !== key))
+    text += '\nReply by quoting this message; other questions are open.';
   await sendText(cfg, text, { contextToken: loadState().contextToken });
 }
 

@@ -56,7 +56,9 @@ Response: { ret, errcode?, errmsg?, msgs?, get_updates_buf?, longpolling_timeout
 
 Start with an empty `get_updates_buf`; retain the returned buffer for the next
 request. Whether reads consume messages server-side is unverified; do not
-share one login across independent state directories.
+share one login across independent state directories. Within one directory a
+single inbox process polls on behalf of every session (see below). Whether the
+server retains messages while nobody polls is also unverified.
 
 ```text
 POST <baseurl>/ilink/bot/sendmessage
@@ -73,7 +75,7 @@ Response: { ret, errmsg? }
 - Text is `item_list[].text_item.text`; voice may carry `voice_item.text` as a transcript. No transcript means no received text.
 - An item's `ref_msg.title` contains quoted text; `ref_msg.message_item` contains the quoted item. The client uses the title, falling back to `message_item.text_item.text`, and keeps its first line for `re:`.
 - `context_token` is issued per inbound message. Echo the latest token from the selected user on every outbound send; it is distinct from the bot's authentication token.
-- This skill persists the cursor and latest conversation token locally and appends every delivered message to `history.log` before advancing the cursor; images, files, and video are not received as content.
+- This skill persists the cursor and latest conversation token locally. The inbox holding `poll.lock` polls for every session in the directory. Each fetched batch is saved under `recovery/` with routing fixed at receipt: a `re:` first line equal to a known title goes to that title's `sessions/<sha256(title)[:16]>/queue.jsonl`, anything else to the most recently started waiting inbox or to the poller itself. The poller appends history and destination queues before advancing the cursor, then removes the distributed batch. Recovery does not restore an older cursor or conversation token. Images, files, and video are not received as content.
 - `ASK_HUMAN_DEBUG=1` makes `inbox` write the raw `msgs` array to stderr.
 
 ## Error Codes and Limits
@@ -83,7 +85,7 @@ Response: { ret, errmsg? }
 - API errors become one-line stderr messages prefixed `wechat: `; stale tokens exit `1` with `wechat: bot token expired or revoked — run setup.mjs again`. The bot token is redacted from any echoed response text.
 - Long-polling is roughly 35 seconds; updates may return `longpolling_timeout_ms`.
 - Text is limited to 4000 characters per message. The client counts JavaScript UTF-16 code units, prefers line/word splits, and avoids splitting surrogate pairs on hard cuts.
-- HTTP `429` is retried honoring numeric `Retry-After` seconds (default 2, capped at 60 per wait) until the call's deadline: the `--wait` window, or about 30 seconds for `notify` and for `inbox` without `--wait`. HTTP-date `Retry-After` is not parsed.
+- HTTP `429` is retried honoring numeric `Retry-After` seconds (default 2, capped at 60 per retry) until the call's deadline: the `--wait` window, 5 seconds for an inbox without `--wait`, or 10 minutes per `notify` part. HTTP-date `Retry-After` is not parsed.
 - During inbox waits, network and `5xx` errors are retried with exponential backoff (2 s doubling to 30 s); expired-token errors fail immediately.
 
 ## Not Implemented

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 export class CliError extends Error {
@@ -30,17 +30,21 @@ export function paths() {
     stateFile: path.join(stateDir, 'state.json'),
     lockFile: path.join(stateDir, 'poll.lock'),
     historyFile: path.join(stateDir, 'history.log'),
+    sessionsDir: path.join(stateDir, 'sessions'),
+    recoveryDir: path.join(stateDir, 'recovery'),
   };
 }
 
 function writeJson(file, value) {
+  const temporary = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(`${file}.tmp`, JSON.stringify(value), { mode: 0o600 });
-    fs.chmodSync(`${file}.tmp`, 0o600);
-    fs.renameSync(`${file}.tmp`, file);
+    fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temporary, file);
   } catch (error) {
     throw new CliError(error.message);
+  } finally {
+    fs.rmSync(temporary, { force: true });
   }
 }
 
@@ -68,6 +72,53 @@ export function saveState(state) {
   writeJson(paths().stateFile, state);
 }
 
+export function resetState() {
+  const { lockFile, sessionsDir, recoveryDir } = paths();
+  fs.rmSync(lockFile, { force: true });
+  fs.rmSync(sessionsDir, { recursive: true, force: true });
+  fs.rmSync(recoveryDir, { recursive: true, force: true });
+  saveState({ cursor: '', contextToken: '' });
+}
+
+export function sessionKey(title = '') {
+  if (/[\r\n]/.test(title)) throw new CliError('wechat: --title must be a single line');
+  return createHash('sha256').update(title).digest('hex').slice(0, 16);
+}
+
+const sessionDir = key => path.join(paths().sessionsDir, key);
+
+export function registerSession(title = '') {
+  const key = sessionKey(title);
+  const file = path.join(sessionDir(key), 'title.json');
+  if (!fs.existsSync(file)) writeJson(file, { title });
+  return key;
+}
+
+export function sessions() {
+  const list = [];
+  let keys = [];
+  try {
+    keys = fs.readdirSync(paths().sessionsDir);
+  } catch {
+    return list;
+  }
+  for (const key of keys) {
+    let title;
+    try {
+      title = JSON.parse(fs.readFileSync(path.join(sessionDir(key), 'title.json'), 'utf8')).title;
+    } catch {}
+    if (typeof title !== 'string') continue;
+    let since = 0;
+    try {
+      const waiter = path.join(sessionDir(key), 'waiter.json');
+      if (Date.now() - fs.statSync(waiter).mtimeMs <= 30000)
+        since = Number(JSON.parse(fs.readFileSync(waiter, 'utf8')).since) || 0;
+    } catch {}
+    list.push({ key, title, since });
+  }
+  return list;
+}
+
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
 const expiredMessage = 'wechat: bot token expired or revoked — run setup.mjs again';
 function cliError(error) {
@@ -75,59 +126,105 @@ function cliError(error) {
   return Object.assign(new CliError(error.message), { cause: error });
 }
 
-export async function withLock(fn, { deadline = Date.now() + 5000 } = {}) {
-  const { stateDir, lockFile } = paths();
-  let heartbeat;
-  let held = false;
-  const release = () => {
-    clearInterval(heartbeat);
-    if (!held) return;
-    held = false;
-    try {
-      fs.unlinkSync(lockFile);
-    } catch {}
-  };
-  const onSignal = signal => {
-    release();
-    process.exit(signal === 'SIGINT' ? 130 : 143);
-  };
+const holds = new Set();
+function onSignal(signal) {
+  for (const release of [...holds]) release();
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+}
+
+function displace(file, judged) {
+  const displaced = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.stale`;
+  fs.renameSync(file, displaced);
   try {
-    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    while (!held) {
-      if (Date.now() > deadline) throw new CliError('wechat: another inbox process holds the poll lock', EXIT.TIMEOUT);
+    const moved = fs.statSync(displaced);
+    if (moved.dev !== judged.dev || moved.ino !== judged.ino || moved.mtimeMs !== judged.mtimeMs) {
       try {
-        fs.closeSync(fs.openSync(lockFile, 'wx', 0o600));
-        held = true;
+        fs.linkSync(displaced, file);
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
+      }
+      return false;
+    }
+    return true;
+  } finally {
+    fs.unlinkSync(displaced);
+  }
+}
+
+function acquire(file, content = JSON.stringify({ pid: process.pid, since: Date.now() }), stealLive = true) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  let fd;
+  for (;;) {
+    try {
+      fd = fs.openSync(file, 'wx', 0o600);
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        const judged = fs.statSync(file);
+        let pid;
         try {
-          if (Date.now() - fs.statSync(lockFile).mtimeMs > 30000) {
-            // rename first so only one waiter takes over a stale lock
-            fs.renameSync(lockFile, `${lockFile}.stale`);
-            fs.unlinkSync(`${lockFile}.stale`);
-            continue;
-          }
-        } catch (error) {
-          if (error.code === 'ENOENT') continue;
-          throw error;
-        }
-        await sleep(500);
+          pid = JSON.parse(fs.readFileSync(file, 'utf8')).pid;
+        } catch {}
+        const known = Number.isInteger(pid) && pid > 0;
+        const dead = known && !alive(pid);
+        if (!stealLive && known && !dead) return undefined;
+        if (!dead && Date.now() - judged.mtimeMs <= 30000) return undefined;
+        if (!displace(file, judged)) return undefined;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
       }
     }
-    heartbeat = setInterval(() => {
-      try {
-        const now = new Date();
-        fs.utimesSync(lockFile, now, now);
-      } catch {}
-    }, 5000);
-    heartbeat.unref();
-    for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, onSignal);
-    return await fn();
+  }
+  const touch = () => {
+    try {
+      const now = new Date();
+      fs.futimesSync(fd, now, now);
+    } catch {}
+  };
+  if (content) fs.writeSync(fd, content);
+  touch();
+  const heartbeat = setInterval(touch, 5000);
+  heartbeat.unref();
+  const held = () => {
+    try {
+      const current = fs.statSync(file);
+      const owned = fs.fstatSync(fd);
+      return current.dev === owned.dev && current.ino === owned.ino;
+    } catch {
+      return false;
+    }
+  };
+  const release = () => {
+    clearInterval(heartbeat);
+    if (!holds.delete(release)) return;
+    if (!holds.size) for (const signal of ['SIGINT', 'SIGTERM']) process.removeListener(signal, onSignal);
+    try {
+      if (held()) displace(file, fs.fstatSync(fd));
+    } catch {}
+    fs.closeSync(fd);
+  };
+  if (!holds.size) for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, onSignal);
+  holds.add(release);
+  return { release, held };
+}
+
+export async function withLock(fn, { deadline = Date.now() + 5000, file = paths().lockFile, stealLive = true } = {}) {
+  let lock;
+  try {
+    for (;;) {
+      if (Date.now() >= deadline)
+        throw new CliError(`wechat: another inbox process holds ${path.basename(file)}`, EXIT.TIMEOUT);
+      lock = acquire(file, undefined, stealLive);
+      if (lock?.held()) break;
+      lock?.release();
+      await sleep(Math.min(500, deadline - Date.now()));
+    }
+    return await fn(lock);
   } catch (error) {
     throw cliError(error);
   } finally {
-    for (const signal of ['SIGINT', 'SIGTERM']) process.removeListener(signal, onSignal);
-    release();
+    lock?.release();
   }
 }
 
@@ -143,8 +240,10 @@ export function headers(token) {
 async function request(url, endpoint, options, { timeoutMs, deadline, token = '' }) {
   const redact = text => (token ? String(text).replaceAll(token, '***') : String(text));
   for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new DOMException('Request deadline elapsed', 'AbortError');
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, remaining));
     let retryAfter;
     try {
       const response = await fetch(url, { ...options(), signal: controller.signal });
@@ -304,67 +403,286 @@ function appendHistory(items) {
   fs.appendFileSync(historyFile, separator + formatInbox(items), { mode: 0o600 });
 }
 
-export async function drain(cfg, { waitSec = 0, since = 0, onItems } = {}) {
-  const deadline = Date.now() + (waitSec > 0 ? waitSec * 1000 : 5000);
-  return withLock(
-    async () => {
-      const state = loadState();
-      const items = [];
-      let succeeded = false;
-      let lastError;
-      let backoff = 2000;
-      let graceEnd = 0;
-      while (waitSec === 0 || Date.now() < (graceEnd || deadline)) {
-        const started = Date.now();
+const alive = pid => {
+  try {
+    return process.kill(pid, 0);
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+};
+
+const withQueue = (key, fn, deadline) =>
+  withLock(fn, { file: path.join(sessionDir(key), 'queue.lock'), deadline, stealLive: false });
+
+async function enqueue(key, items, held, deadline) {
+  const lines = items.map(item => `${JSON.stringify(item)}\n`).join('');
+  try {
+    return await withQueue(
+      key,
+      () => {
+        if (!held()) return false;
+        const fd = fs.openSync(path.join(sessionDir(key), 'queue.jsonl'), 'a+', 0o600);
         try {
-          const timeout = graceEnd ? graceEnd - started : waitSec === 0 ? 4000 : Math.min(deadline - started, 40000);
-          const result = await fetchUpdates(
-            cfg,
-            state.cursor,
-            timeout,
-            graceEnd || (waitSec === 0 ? started + 30000 : deadline),
-          );
-          succeeded = true;
-          backoff = 2000;
-          const received = humanMessages(result.msgs, cfg.userId).filter(item => item.time >= since);
-          if (received.length) {
-            items.push(...received);
-            // hand over before the cursor moves so an interrupted call redelivers
-            appendHistory(received);
-            await onItems?.(received);
-            if (received.at(-1).contextToken) state.contextToken = received.at(-1).contextToken;
-          }
-          state.cursor = result.cursor;
-          saveState(state);
-          if (waitSec === 0) break;
-          if (items.length && !graceEnd) graceEnd = Date.now() + 2000;
-          if (!received.length && Date.now() - started < 1000)
-            await sleep(Math.min(1000, (graceEnd || deadline) - Date.now()));
+          const size = fs.fstatSync(fd).size;
+          const tail = Buffer.alloc(1);
+          if (size && fs.readSync(fd, tail, 0, 1, size - 1) && tail[0] !== 10) fs.writeSync(fd, '\n');
+          fs.appendFileSync(fd, lines);
+        } finally {
+          fs.closeSync(fd);
+        }
+        return true;
+      },
+      deadline,
+    );
+  } catch (error) {
+    if (error.exitCode === EXIT.TIMEOUT) throw new CliError(error.message);
+    throw error;
+  }
+}
+
+// moves queue.jsonl and dead consumers' claims under this pid; returns the claim files oldest first
+function claimQueue(key, deadline) {
+  const dir = sessionDir(key);
+  return withQueue(
+    key,
+    () => {
+      const older = [];
+      for (const name of fs.readdirSync(dir)) {
+        const owner = /^queue\.jsonl\.(\d+)(\.|$)/.exec(name)?.[1];
+        if (!owner) continue;
+        if (Number(owner) === process.pid) {
+          older.push(name);
+          continue;
+        }
+        if (alive(Number(owner))) continue;
+        const taken = `queue.jsonl.${process.pid}.${name.slice('queue.jsonl.'.length)}`;
+        try {
+          fs.renameSync(path.join(dir, name), path.join(dir, taken));
+          older.push(taken);
         } catch (error) {
-          if (!(error instanceof CliError) || error.message === expiredMessage) throw error;
-          if (waitSec === 0) {
-            if (error.status === 429) break;
-            throw error;
-          }
-          if (graceEnd) break;
-          lastError = error;
-          await sleep(Math.min(backoff, deadline - Date.now()));
-          backoff = Math.min(backoff * 2, 30000);
+          if (error.code !== 'ENOENT') throw error;
         }
       }
-      saveState(state);
-      if (waitSec > 0 && !items.length) {
-        if (!succeeded && lastError && lastError.status !== 429) throw lastError;
-        throw new CliError(`wechat: no message received within ${waitSec} s`, EXIT.TIMEOUT);
+      const files = older
+        .map(name => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }))
+        .sort((a, b) => a.mtime - b.mtime)
+        .map(entry => path.join(dir, entry.name));
+      const queue = path.join(dir, 'queue.jsonl');
+      const fresh = `${queue}.${process.pid}`;
+      if (fs.existsSync(queue)) {
+        if (fs.existsSync(fresh)) {
+          const aside = `${fresh}.${Date.now()}`;
+          fs.renameSync(fresh, aside);
+          files[files.indexOf(fresh)] = aside;
+        }
+        fs.renameSync(queue, fresh);
+        files.push(fresh);
       }
-      return items;
+      return files;
     },
-    { deadline },
-  ).catch(error => {
-    // no-wait must exit 0: whoever holds the lock is draining the same inbox
-    if (waitSec === 0 && error.exitCode === EXIT.TIMEOUT) return [];
+    deadline,
+  );
+}
+
+async function dequeue(key, handOver, deadline) {
+  const files = await claimQueue(key, deadline);
+  const items = [];
+  const corrupt = new Set();
+  for (const file of files) {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line) continue;
+      try {
+        const item = JSON.parse(line);
+        if (
+          typeof item?.text !== 'string' ||
+          !Number.isFinite(item.time) ||
+          !Number.isFinite(new Date(item.time).getTime()) ||
+          typeof item.re !== 'string' ||
+          typeof item.from !== 'string' ||
+          typeof item.contextToken !== 'string'
+        ) {
+          corrupt.add(file);
+          continue;
+        }
+        items.push(item);
+      } catch {
+        corrupt.add(file);
+      }
+    }
+  }
+  if (items.length) await handOver(items);
+  for (const file of files) {
+    if (corrupt.has(file)) {
+      const destination = path.join(sessionDir(key), `queue.jsonl.corrupt.${randomBytes(16).toString('hex')}`);
+      fs.renameSync(file, destination);
+      process.stderr.write(`${new CliError(`corrupt queue preserved at ${destination}`).message}\n`);
+    } else fs.unlinkSync(file);
+  }
+}
+
+function route(items, key) {
+  const known = sessions();
+  const latest = known.filter(session => session.since).sort((a, b) => b.since - a.since)[0];
+  const targets = [];
+  for (const item of items) {
+    const target = (item.re && known.find(session => session.title === item.re)?.key) || latest?.key || key;
+    if (targets.at(-1)?.[0] === target) targets.at(-1)[1].push(item);
+    else targets.push([target, [item]]);
+  }
+  return targets;
+}
+
+function publishRecovery(items, key) {
+  const name = `${String(Date.now()).padStart(16, '0')}-${String(process.hrtime.bigint()).padStart(24, '0')}-${randomBytes(8).toString('hex')}.json`;
+  writeJson(path.join(paths().recoveryDir, name), { targets: [...route(items, key)] });
+}
+
+async function replayRecovery(held, deadline) {
+  const { recoveryDir } = paths();
+  let names;
+  try {
+    names = fs.readdirSync(recoveryDir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
     throw error;
-  });
+  }
+  for (const name of names.filter(name => /^\d{16}-\d{24}-[a-f0-9]{16}\.json$/.test(name)).sort()) {
+    if (!held()) return false;
+    if (Date.now() >= deadline) throw new CliError('wechat: recovery deadline elapsed');
+    const file = path.join(recoveryDir, name);
+    const batch = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (
+      !Array.isArray(batch.targets) ||
+      !batch.targets.every(
+        target =>
+          Array.isArray(target) && target.length === 2 && /^[a-f0-9]{16}$/.test(target[0]) && Array.isArray(target[1]),
+      )
+    )
+      throw new CliError(`wechat: invalid recovery batch ${file}`);
+    appendHistory(batch.targets.flatMap(([, items]) => items));
+    for (const [target, items] of batch.targets) {
+      if (!held() || !(await enqueue(target, items, held, deadline)) || !held()) return false;
+    }
+    if (!held()) return false;
+    fs.unlinkSync(file);
+  }
+  return true;
+}
+
+export async function drain(cfg, { waitSec = 0, since = 0, onItems, title = '' } = {}) {
+  const key = registerSession(title);
+  const started = Date.now();
+  const deadline = started + (waitSec > 0 ? waitSec * 1000 : 5000);
+  const items = [];
+  let poll;
+  let waiter;
+  let succeeded = false;
+  let lastError;
+  let backoff = 2000;
+  let graceEnd = 0;
+  const endTime = () => Math.min(graceEnd || deadline, deadline);
+  const reclaim = async () => {
+    poll?.release();
+    for (;;) {
+      const end = endTime();
+      if (Date.now() >= end) throw new CliError('wechat: another inbox process holds poll.lock');
+      poll = acquire(paths().lockFile);
+      if (poll?.held()) break;
+      poll?.release();
+      await sleep(Math.min(500, end - Date.now()));
+    }
+  };
+  const recover = async () => {
+    while (!poll.held() || !(await replayRecovery(() => poll.held(), endTime()))) await reclaim();
+  };
+  const handOver = async received => {
+    items.push(...received);
+    await onItems?.(received);
+    if (waitSec > 0 && !graceEnd) graceEnd = Date.now() + 2000;
+  };
+  try {
+    for (;;) {
+      if (Date.now() >= endTime()) break;
+      try {
+        await dequeue(key, handOver, endTime());
+      } catch (error) {
+        if (error.exitCode !== EXIT.TIMEOUT) throw error;
+        if (waitSec === 0) throw new CliError(error.message);
+        break;
+      }
+      const end = endTime();
+      if (waitSec === 0 ? items.length : Date.now() >= end) break;
+      if (waiter && !waiter.held()) {
+        waiter.release();
+        waiter = undefined;
+      }
+      if (waitSec > 0)
+        waiter ??= acquire(
+          path.join(sessionDir(key), 'waiter.json'),
+          JSON.stringify({ pid: process.pid, since: started }),
+        );
+      if (poll && !poll.held()) {
+        poll.release();
+        poll = undefined;
+      }
+      poll ??= acquire(paths().lockFile);
+      if (!poll?.held()) {
+        if (waitSec === 0) break;
+        await sleep(Math.min(500, end - Date.now()));
+        continue;
+      }
+      await recover();
+      await dequeue(key, handOver, endTime());
+      if (waitSec === 0 ? items.length : Date.now() >= endTime()) break;
+      if (!poll.held()) continue;
+      const originalPoll = poll;
+      const now = Date.now();
+      const state = loadState();
+      let result;
+      try {
+        const timeout = Math.min(endTime() - now, waitSec === 0 ? 4000 : 40000);
+        result = await fetchUpdates(cfg, state.cursor, timeout, endTime());
+      } catch (error) {
+        if (!(error instanceof CliError) || error.message === expiredMessage) throw error;
+        await recover();
+        await dequeue(key, handOver, endTime());
+        if (items.length) break;
+        if (waitSec === 0) {
+          if (error.status === 429) break;
+          throw error;
+        }
+        if (graceEnd) break;
+        lastError = error;
+        await sleep(Math.min(backoff, deadline - Date.now()));
+        backoff = Math.min(backoff * 2, 30000);
+        continue;
+      }
+      succeeded = true;
+      backoff = 2000;
+      const received = humanMessages(result.msgs, cfg.userId).filter(item => item.time >= since);
+      if (received.length) publishRecovery(received, key);
+      await recover();
+      if (poll === originalPoll && poll.held()) {
+        state.cursor = result.cursor;
+        if (received.at(-1)?.contextToken) state.contextToken = received.at(-1).contextToken;
+        saveState(state);
+      }
+      if (Date.now() >= endTime()) break;
+      await dequeue(key, handOver, endTime());
+      if (waitSec === 0) break;
+      if (!received.length && Date.now() - now < 1000) await sleep(Math.min(1000, endTime() - Date.now()));
+    }
+    if (waitSec > 0 && !items.length) {
+      if (!succeeded && lastError && lastError.status !== 429) throw lastError;
+      throw new CliError(`wechat: no message received within ${waitSec} s`, EXIT.TIMEOUT);
+    }
+    return items;
+  } catch (error) {
+    throw cliError(error);
+  } finally {
+    waiter?.release();
+    poll?.release();
+  }
 }
 
 export async function login({ out, ask, onQr, pollIntervalMs = 1000 }) {

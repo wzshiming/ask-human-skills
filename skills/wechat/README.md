@@ -67,7 +67,8 @@ That is the path after `npx skills add -g`; with another install location use `<
    Reply to that message in WeChat. Setup waits up to 10 minutes for your reply.
 5. Setup prints `Reply received: <reply>`, then `Config written to <path>`, and exits.
 
-Re-run setup any time to re-pair; it replaces the previous config.
+Re-run setup any time to re-pair; it replaces the previous config, resets the local read cursor and clears the
+per-title queues and recovery batches, so stop any running inbox calls first.
 Also re-run it when the agent reports `wechat: bot token expired or revoked`.
 
 ## Files
@@ -77,17 +78,30 @@ Also re-run it when the agent reports `wechat: bot token expired or revoked`.
 - `wechat.json`: bot token and your WeChat user id, created by setup with mode `0600`.
   Never paste its contents into a chat.
 - `wechat/state.json`: read cursor and latest conversation token.
-- `wechat/poll.lock`: coordinates concurrent inbox calls.
+- `wechat/poll.lock`: held by the one inbox call that is polling WeChat for everyone.
 - `wechat/history.log`: every message the agent received, in the same block format the agent sees.
   This is the recovery record if agent output was lost.
+- `wechat/recovery/`: fetched batches awaiting distribution; the next poller resumes them before fetching again.
+- `wechat/sessions/<key>/`: one folder per `--title` the agent has used: `title.json` (the title), `queue.jsonl`
+  (replies routed to that title and not yet read; `queue.jsonl.<pid>` while a call is reading them),
+  `waiter.json` (present while an inbox call is waiting) and `queue.lock` for the short local writes.
+  Malformed records are kept in `queue.jsonl.corrupt.<random>`; a warning identifies the recovery file.
 
-`wechat/state.json` and `wechat/poll.lock` are safe to delete; they are rebuilt on the next call.
+Delete `wechat/state.json` or `wechat/poll.lock` only when no inbox is running; they are rebuilt on the next call.
+`wechat/sessions/` and `wechat/recovery/` hold unread replies; deleting them discards those replies.
 
 ## Parallel agent sessions
 
-One `ASK_HUMAN_DIR` is one conversation: whichever session reads first takes the messages.
-Give each concurrent session its own `ASK_HUMAN_DIR` and run setup once per directory with a separate QR login;
-the agent process must run with the same value:
+All agent sessions on the machine share one `ASK_HUMAN_DIR`, one QR login and one bot; set up once.
+The agent tells sessions apart by the `--title` it puts on every message and inbox call, so each session uses
+a unique, stable title such as `<project>: <task>`. A reply that quotes a question goes to the session that
+asked it; a message sent without quoting goes to the session that most recently started waiting. When several
+questions are open, a question ends with `Reply by quoting this message; other questions are open.`: use
+WeChat's quote/reply on the question you are answering. A quoted reply to a session that is not currently waiting
+stays in that session's queue until it reads it.
+
+A different `ASK_HUMAN_DIR` (another machine, or a deliberately separate conversation) needs its own setup run
+with that variable set; the agent process must run with the same value:
 
 ```sh
 ASK_HUMAN_DIR=~/.config/ask-human-b node ~/.agents/skills/wechat/scripts/setup.mjs
@@ -102,3 +116,9 @@ because reading may consume the server-side cursor.
 - `bot token expired or revoked` (exit `1`): run setup again.
 - QR not scannable in the terminal: open the printed URL in a browser and scan the page.
 - The agent lost an answer: the tail of `history.log` has it; there is no need to resend.
+- You answered after the agent's wait had expired: quote the question if other sessions are open; the reply is
+  queued for that title as soon as any inbox call polls and stays there until the agent runs `inbox` with the
+  same title, so ask the agent to check its inbox rather than resending. Whether WeChat keeps messages for the
+  bot while nobody is polling is unverified.
+- The answer reached the wrong session: an unquoted message goes to the session that most recently started
+  waiting; when several questions are open, answer each by quoting it.
