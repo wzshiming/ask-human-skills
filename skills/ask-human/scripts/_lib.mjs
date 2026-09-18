@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 export class CliError extends Error {
   constructor(message, exitCode = 1) {
     super(
-      `wechat: ${String(message)
-        .replace(/^wechat: /, '')
+      `ask-human: ${String(message)
+        .replace(/^ask-human: /, '')
         .replace(/[\r\n\u2028\u2029]+/g, ' ')}`,
     );
     this.name = 'CliError';
@@ -18,14 +18,35 @@ export class CliError extends Error {
 
 export const EXIT = { OK: 0, FAIL: 1, NOT_CONFIGURED: 2, TIMEOUT: 124 };
 export const SETUP_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'setup.mjs');
-export const CHUNK_LIMIT = 4000;
+export const CHANNELS = ['wechat'];
 
-export function paths() {
-  const dir = process.env.ASK_HUMAN_DIR || path.join(os.homedir(), '.config', 'ask-human');
-  const stateDir = path.join(dir, 'wechat');
+let current;
+let adapter;
+
+export async function useChannel(name) {
+  if (!CHANNELS.includes(name))
+    throw new CliError(`unknown channel ${JSON.stringify(name)} — available: ${CHANNELS.join(', ')}`);
+  adapter = await import(`./_${name}.mjs`);
+  current = name;
+  return adapter;
+}
+
+export function channel() {
+  if (!adapter) throw new CliError('no channel selected');
+  return adapter;
+}
+
+const baseDir = () => process.env.ASK_HUMAN_DIR || path.join(os.homedir(), '.config', 'ask-human');
+const pointerFile = () => path.join(baseDir(), 'config.json');
+const setupHint = name => `run: node ${SETUP_SCRIPT} ${name}`;
+
+export function paths(name = current) {
+  const dir = baseDir();
+  const stateDir = path.join(dir, name);
   return {
     dir,
-    configFile: path.join(dir, 'wechat.json'),
+    pointerFile: pointerFile(),
+    configFile: path.join(dir, `${name}.json`),
     stateDir,
     stateFile: path.join(stateDir, 'state.json'),
     lockFile: path.join(stateDir, 'poll.lock'),
@@ -48,12 +69,42 @@ function writeJson(file, value) {
   }
 }
 
+export const configured = name => fs.existsSync(paths(name).configFile);
+
+export function activeChannel() {
+  const file = pointerFile();
+  const choice = CHANNELS.length === 1 ? CHANNELS[0] : `<${CHANNELS.join('|')}>`;
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new CliError(`not configured — ${setupHint(choice)}`, EXIT.NOT_CONFIGURED);
+    throw new CliError(`cannot read ${file}: ${error.message} — ${setupHint(choice)}`, EXIT.NOT_CONFIGURED);
+  }
+  let name;
+  try {
+    name = JSON.parse(raw)?.channel;
+  } catch {}
+  if (!CHANNELS.includes(name))
+    throw new CliError(
+      `invalid ${file} (available: ${CHANNELS.join(', ')}) — ${setupHint(choice)}`,
+      EXIT.NOT_CONFIGURED,
+    );
+  if (!configured(name))
+    throw new CliError(`${paths(name).configFile} missing — ${setupHint(name)}`, EXIT.NOT_CONFIGURED);
+  return name;
+}
+
+export function saveActive(name) {
+  writeJson(pointerFile(), { channel: name });
+}
+
 export function loadConfig() {
   try {
     const config = JSON.parse(fs.readFileSync(paths().configFile, 'utf8'));
-    if (['token', 'baseUrl', 'userId'].every(key => typeof config?.[key] === 'string' && config[key])) return config;
+    if (channel().configKeys.every(key => typeof config?.[key] === 'string' && config[key])) return config;
   } catch {}
-  throw new CliError(`wechat: not configured — run: node ${SETUP_SCRIPT}`, EXIT.NOT_CONFIGURED);
+  throw new CliError(`${current} not configured — ${setupHint(current)}`, EXIT.NOT_CONFIGURED);
 }
 
 export function saveConfig(cfg) {
@@ -63,9 +114,9 @@ export function saveConfig(cfg) {
 export function loadState() {
   try {
     const state = JSON.parse(fs.readFileSync(paths().stateFile, 'utf8'));
-    if (typeof state?.cursor === 'string' && typeof state.contextToken === 'string') return state;
+    if (state && typeof state === 'object' && !Array.isArray(state)) return state;
   } catch {}
-  return { cursor: '', contextToken: '' };
+  return {};
 }
 
 export function saveState(state) {
@@ -77,11 +128,11 @@ export function resetState() {
   fs.rmSync(lockFile, { force: true });
   fs.rmSync(sessionsDir, { recursive: true, force: true });
   fs.rmSync(recoveryDir, { recursive: true, force: true });
-  saveState({ cursor: '', contextToken: '' });
+  saveState({});
 }
 
 export function sessionKey(title = '') {
-  if (/[\r\n]/.test(title)) throw new CliError('wechat: --title must be a single line');
+  if (/[\r\n]/.test(title)) throw new CliError('--title must be a single line');
   return createHash('sha256').update(title).digest('hex').slice(0, 16);
 }
 
@@ -120,8 +171,7 @@ export function sessions() {
 }
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
-const expiredMessage = 'wechat: bot token expired or revoked — run setup.mjs again';
-function cliError(error) {
+export function cliError(error) {
   if (error instanceof CliError || error.name === 'AbortError') return error;
   return Object.assign(new CliError(error.message), { cause: error });
 }
@@ -214,7 +264,7 @@ export async function withLock(fn, { deadline = Date.now() + 5000, file = paths(
   try {
     for (;;) {
       if (Date.now() >= deadline)
-        throw new CliError(`wechat: another inbox process holds ${path.basename(file)}`, EXIT.TIMEOUT);
+        throw new CliError(`another inbox process holds ${path.basename(file)}`, EXIT.TIMEOUT);
       lock = acquire(file, undefined, stealLive);
       if (lock?.held()) break;
       lock?.release();
@@ -228,17 +278,8 @@ export async function withLock(fn, { deadline = Date.now() + 5000, file = paths(
   }
 }
 
-export function headers(token) {
-  return {
-    'Content-Type': 'application/json',
-    AuthorizationType: 'ilink_bot_token',
-    Authorization: `Bearer ${token}`,
-    'X-WECHAT-UIN': Buffer.from(String(randomBytes(4).readUInt32BE(0))).toString('base64'),
-  };
-}
-
-async function request(url, endpoint, options, { timeoutMs, deadline, token = '' }) {
-  const redact = text => (token ? String(text).replaceAll(token, '***') : String(text));
+export async function request(url, options, { timeoutMs = 15000, deadline = Date.now() + 600000, redact = '' } = {}) {
+  const clean = text => (redact ? String(text).replaceAll(redact, '***') : String(text));
   for (;;) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new DOMException('Request deadline elapsed', 'AbortError');
@@ -246,38 +287,30 @@ async function request(url, endpoint, options, { timeoutMs, deadline, token = ''
     const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, remaining));
     let retryAfter;
     try {
-      const response = await fetch(url, { ...options(), signal: controller.signal });
-      if (response.status === 401) throw new CliError(expiredMessage);
+      const target = new URL(url);
+      const response = await globalThis.fetch(target, { ...options(), signal: controller.signal });
       if (response.status === 429) {
         // rate limits are absorbed here so the agent never has to handle them
         const seconds = Number(response.headers.get('Retry-After') ?? 2);
         retryAfter = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 2000, 60000);
         await response.body?.cancel();
         if (Date.now() + retryAfter > deadline)
-          throw Object.assign(new CliError(`wechat: ${endpoint} rate limited (HTTP 429), try again later`), {
+          throw Object.assign(new CliError(`${target.pathname} rate limited (HTTP 429), try again later`), {
             status: 429,
           });
       } else {
-        if (!response.ok)
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
           throw Object.assign(
-            new CliError(
-              `wechat: ${endpoint} HTTP ${response.status}: ${redact((await response.text()).slice(0, 200))}`,
-            ),
+            new CliError(`${target.pathname} HTTP ${response.status}: ${clean(detail.slice(0, 200))}`),
             { status: response.status },
           );
-        let result;
+        }
         try {
-          result = await response.json();
+          return await response.json();
         } catch {
-          throw new CliError(`wechat: ${endpoint} returned invalid JSON`);
+          throw new CliError(`${target.pathname} returned invalid JSON`);
         }
-        if (result?.ret === -14 || result?.errcode === -14) throw new CliError(expiredMessage);
-        if ((result?.ret != null && result.ret !== 0) || (result?.errcode != null && result.errcode !== 0)) {
-          throw new CliError(
-            `wechat: ${endpoint} ret=${result.ret} errcode=${result.errcode} ${redact(result.errmsg ?? '')}`,
-          );
-        }
-        return result;
       }
     } catch (error) {
       throw cliError(error);
@@ -288,30 +321,12 @@ async function request(url, endpoint, options, { timeoutMs, deadline, token = ''
   }
 }
 
-export async function apiPost(baseUrl, endpoint, body, { token, timeoutMs = 15000, deadline = Date.now() + 600000 }) {
-  try {
-    const url = new URL(endpoint, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
-    return await request(
-      url,
-      endpoint,
-      () => ({ method: 'POST', headers: headers(token), body: JSON.stringify(body) }),
-      { timeoutMs, deadline, token },
-    );
-  } catch (error) {
-    throw cliError(error);
-  }
-}
-
-export async function apiGet(url, { headers = {}, timeoutMs = 15000, deadline = Date.now() + 600000 } = {}) {
-  return request(url, String(url), () => ({ method: 'GET', headers }), { timeoutMs, deadline });
-}
-
 export function formatOutgoing({ title = '', message = '', choices = [] }) {
   return `${title ? `${title}\n` : ''}${message}${choices.length ? `\n\n${choices.map((choice, index) => `${index + 1}. ${choice}`).join('\n')}` : ''}`.trimEnd();
 }
 
-export function splitText(text, limit = CHUNK_LIMIT) {
-  if (!Number.isInteger(limit) || limit < 1) throw new CliError('wechat: invalid text chunk limit');
+export function splitText(text, limit) {
+  if (!Number.isInteger(limit) || limit < 1) throw new CliError('invalid text chunk limit');
   const chunks = [];
   while (text.length > limit) {
     let cut = text.lastIndexOf('\n', limit);
@@ -320,7 +335,7 @@ export function splitText(text, limit = CHUNK_LIMIT) {
     if (!separator) {
       cut = limit;
       if (/[\uD800-\uDBFF]/.test(text[cut - 1]) && /[\uDC00-\uDFFF]/.test(text[cut])) cut--;
-      if (!cut) throw new CliError('wechat: text chunk limit cannot fit a surrogate pair');
+      if (!cut) throw new CliError('text chunk limit cannot fit a surrogate pair');
     }
     chunks.push(text.slice(0, cut));
     text = text.slice(cut + (separator ? 1 : 0));
@@ -330,42 +345,10 @@ export function splitText(text, limit = CHUNK_LIMIT) {
   return kept.length ? kept : [''];
 }
 
-export async function sendText(cfg, text, { contextToken = '' } = {}) {
-  for (const chunk of splitText(text)) {
-    const msg = {
-      from_user_id: '',
-      to_user_id: cfg.userId,
-      client_id: `ask-human-${Date.now()}-${randomBytes(8).toString('hex')}`,
-      message_type: 2,
-      message_state: 2,
-      item_list: [{ type: 1, text_item: { text: chunk } }],
-    };
-    if (contextToken) msg.context_token = contextToken;
-    await apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', { msg }, { token: cfg.token });
-  }
-}
-
-export function humanMessages(msgs, userId) {
-  const items = [];
-  for (const msg of msgs) {
-    if (msg.message_type !== 1 || (userId && msg.from_user_id !== userId)) continue;
-    const parts = msg.item_list ?? [];
-    const text = parts
-      .flatMap(item => [item.text_item?.text, item.voice_item?.text])
-      .filter(text => typeof text === 'string' && text)
-      .join('\n');
-    if (!text) continue;
-    const ref = parts.find(item => item.ref_msg)?.ref_msg;
-    const re = (ref?.title || ref?.message_item?.text_item?.text || '').split(/\r?\n/)[0];
-    items.push({
-      time: msg.create_time_ms ?? Date.now(),
-      from: msg.from_user_id,
-      text,
-      re,
-      contextToken: msg.context_token ?? '',
-    });
-  }
-  return items;
+export async function send(cfg, text, options = {}) {
+  const { textLimit, send: deliver } = channel();
+  const state = loadState();
+  for (const chunk of splitText(text, textLimit)) await deliver(cfg, state, chunk, options);
 }
 
 export function formatInbox(items) {
@@ -379,22 +362,6 @@ export function formatInbox(items) {
       })
       .join('\n---\n') + (items.length ? '\n' : '')
   );
-}
-
-export async function fetchUpdates(cfg, cursor, timeoutMs, deadline) {
-  try {
-    const result = await apiPost(
-      cfg.baseUrl,
-      'ilink/bot/getupdates',
-      { get_updates_buf: cursor || '' },
-      { token: cfg.token, timeoutMs, deadline },
-    );
-    if (process.env.ASK_HUMAN_DEBUG && result.msgs?.length) process.stderr.write(`${JSON.stringify(result.msgs)}\n`);
-    return { msgs: result.msgs ?? [], cursor: result.get_updates_buf || cursor };
-  } catch (error) {
-    if (error.name === 'AbortError') return { msgs: [], cursor };
-    throw error;
-  }
 }
 
 function appendHistory(items) {
@@ -498,8 +465,7 @@ async function dequeue(key, handOver, deadline) {
           !Number.isFinite(item.time) ||
           !Number.isFinite(new Date(item.time).getTime()) ||
           typeof item.re !== 'string' ||
-          typeof item.from !== 'string' ||
-          typeof item.contextToken !== 'string'
+          typeof item.from !== 'string'
         ) {
           corrupt.add(file);
           continue;
@@ -548,7 +514,7 @@ async function replayRecovery(held, deadline) {
   }
   for (const name of names.filter(name => /^\d{16}-\d{24}-[a-f0-9]{16}\.json$/.test(name)).sort()) {
     if (!held()) return false;
-    if (Date.now() >= deadline) throw new CliError('wechat: recovery deadline elapsed');
+    if (Date.now() >= deadline) throw new CliError('recovery deadline elapsed');
     const file = path.join(recoveryDir, name);
     const batch = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (
@@ -558,7 +524,7 @@ async function replayRecovery(held, deadline) {
           Array.isArray(target) && target.length === 2 && /^[a-f0-9]{16}$/.test(target[0]) && Array.isArray(target[1]),
       )
     )
-      throw new CliError(`wechat: invalid recovery batch ${file}`);
+      throw new CliError(`invalid recovery batch ${file}`);
     appendHistory(batch.targets.flatMap(([, items]) => items));
     for (const [target, items] of batch.targets) {
       if (!held() || !(await enqueue(target, items, held, deadline)) || !held()) return false;
@@ -585,7 +551,7 @@ export async function drain(cfg, { waitSec = 0, since = 0, onItems, title = '' }
     poll?.release();
     for (;;) {
       const end = endTime();
-      if (Date.now() >= end) throw new CliError('wechat: another inbox process holds poll.lock');
+      if (Date.now() >= end) throw new CliError('another inbox process holds poll.lock');
       poll = acquire(paths().lockFile);
       if (poll?.held()) break;
       poll?.release();
@@ -637,13 +603,12 @@ export async function drain(cfg, { waitSec = 0, since = 0, onItems, title = '' }
       if (!poll.held()) continue;
       const originalPoll = poll;
       const now = Date.now();
-      const state = loadState();
       let result;
       try {
         const timeout = Math.min(endTime() - now, waitSec === 0 ? 4000 : 40000);
-        result = await fetchUpdates(cfg, state.cursor, timeout, endTime());
+        result = await channel().fetch(cfg, loadState(), { timeoutMs: timeout, deadline: endTime(), since });
       } catch (error) {
-        if (!(error instanceof CliError) || error.message === expiredMessage) throw error;
+        if (!(error instanceof CliError) || error.fatal) throw error;
         await recover();
         await dequeue(key, handOver, endTime());
         if (items.length) break;
@@ -659,14 +624,10 @@ export async function drain(cfg, { waitSec = 0, since = 0, onItems, title = '' }
       }
       succeeded = true;
       backoff = 2000;
-      const received = humanMessages(result.msgs, cfg.userId).filter(item => item.time >= since);
+      const received = result.items.filter(item => item.time >= since);
       if (received.length) publishRecovery(received, key);
       await recover();
-      if (poll === originalPoll && poll.held()) {
-        state.cursor = result.cursor;
-        if (received.at(-1)?.contextToken) state.contextToken = received.at(-1).contextToken;
-        saveState(state);
-      }
+      if (poll === originalPoll && poll.held()) saveState(result.state);
       if (Date.now() >= endTime()) break;
       await dequeue(key, handOver, endTime());
       if (waitSec === 0) break;
@@ -674,7 +635,7 @@ export async function drain(cfg, { waitSec = 0, since = 0, onItems, title = '' }
     }
     if (waitSec > 0 && !items.length) {
       if (!succeeded && lastError && lastError.status !== 429) throw lastError;
-      throw new CliError(`wechat: no message received within ${waitSec} s`, EXIT.TIMEOUT);
+      throw new CliError(`no message received within ${waitSec} s`, EXIT.TIMEOUT);
     }
     return items;
   } catch (error) {
@@ -682,82 +643,5 @@ export async function drain(cfg, { waitSec = 0, since = 0, onItems, title = '' }
   } finally {
     waiter?.release();
     poll?.release();
-  }
-}
-
-export async function login({ out, ask, onQr, pollIntervalMs = 1000 }) {
-  const base = 'https://ilinkai.weixin.qq.com';
-  const deadline = Date.now() + 8 * 60 * 1000;
-  let pollBase = base;
-  let qrcode;
-  let code = '';
-  let scanned = false;
-  let refreshes = 0;
-  try {
-    while (Date.now() < deadline) {
-      if (!qrcode) {
-        const result = await apiGet(`${base}/ilink/bot/get_bot_qrcode?bot_type=3`);
-        if (!result?.qrcode || !result.qrcode_img_content) throw new CliError('wechat: invalid QR login response');
-        qrcode = result.qrcode;
-        pollBase = base;
-        code = '';
-        scanned = false;
-        await onQr(result.qrcode_img_content);
-      }
-      if (Date.now() >= deadline) break;
-      let result;
-      try {
-        result = await apiGet(
-          `${pollBase}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}${code ? `&verify_code=${encodeURIComponent(code)}` : ''}`,
-          { headers: { 'iLink-App-ClientVersion': '1' }, timeoutMs: 35000 },
-        );
-      } catch (error) {
-        // timeouts, network errors and gateway 5xx are routine during the 35 s long-poll
-        const transient =
-          error.name === 'AbortError' || error.status >= 500 || (error.cause && !(error.cause instanceof SyntaxError));
-        if (!transient) throw error;
-        result = { status: 'wait' };
-      }
-      if (Date.now() >= deadline) break;
-      switch (result.status) {
-        case 'wait':
-          break;
-        case 'scaned':
-          if (!scanned) {
-            await out('Scanned — confirm on your phone.');
-            scanned = true;
-          }
-          code = '';
-          break;
-        case 'need_verifycode':
-          code = await ask('Enter the number shown in WeChat: ');
-          continue;
-        case 'verify_code_blocked':
-          throw new CliError('wechat: too many wrong codes — try again later');
-        case 'expired':
-          if (refreshes++ >= 3) throw new CliError('wechat: QR code expired too many times — try again');
-          qrcode = '';
-          continue;
-        case 'scaned_but_redirect':
-          if (result.redirect_host) pollBase = `https://${result.redirect_host}`;
-          break;
-        case 'binded_redirect':
-          throw new CliError('wechat: this bot is already bound to another client — log it out there first');
-        case 'confirmed':
-          if (!result.bot_token || !result.ilink_bot_id) throw new CliError('wechat: incomplete login confirmation');
-          return {
-            token: result.bot_token,
-            baseUrl: result.baseurl || base,
-            botId: result.ilink_bot_id,
-            userId: result.ilink_user_id || '',
-          };
-        default:
-          throw new CliError(`wechat: unknown login status: ${result.status}`);
-      }
-      if (pollIntervalMs > 0) await sleep(Math.min(pollIntervalMs, deadline - Date.now()));
-    }
-    throw new CliError('wechat: login timed out');
-  } catch (error) {
-    throw cliError(error);
   }
 }

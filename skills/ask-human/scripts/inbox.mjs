@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { CliError, drain, formatInbox, loadConfig } from './_lib.mjs';
+import { CliError, activeChannel, drain, formatInbox, loadConfig, useChannel } from './_lib.mjs';
 
 async function main() {
   const { values } = parseArgs({
@@ -9,8 +9,9 @@ async function main() {
   });
   const waitSec = values.wait === undefined ? 0 : Number(values.wait);
   if (values.wait !== undefined && (!Number.isInteger(waitSec) || waitSec < 1)) {
-    throw new CliError('wechat: usage: inbox.mjs [--wait SEC] [--title T]', 1);
+    throw new CliError('usage: inbox.mjs [--wait SEC] [--title T]', 1);
   }
+  await useChannel(activeChannel());
   const cfg = loadConfig();
   let printed = false;
   await drain(cfg, {
@@ -25,6 +26,6 @@ async function main() {
 }
 
 main().catch(err => {
-  process.stderr.write(`${err instanceof CliError ? err.message : `wechat: ${err.message}`}\n`);
+  process.stderr.write(`${err instanceof CliError ? err.message : `ask-human: ${err.message}`}\n`);
   process.exit(err.exitCode ?? 1);
 });

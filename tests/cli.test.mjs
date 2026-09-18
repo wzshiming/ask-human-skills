@@ -180,6 +180,7 @@ if (!isMainThread) {
     await command({ type: 'reset' });
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-cli-'));
     dirs.push(dir);
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
     fs.writeFileSync(
       path.join(dir, 'wechat.json'),
       JSON.stringify({
@@ -243,13 +244,14 @@ if (!isMainThread) {
   });
 
   test('notify reports missing configuration with exit 2 and a setup hint', () => {
+    fs.rmSync(path.join(dir, 'config.json'));
     fs.rmSync(path.join(dir, 'wechat.json'));
-    failure(run('notify.mjs', ['hello']), 2, /setup\.mjs/);
+    failure(run('notify.mjs', ['hello']), 2, /not configured — run: node \S*setup\.mjs wechat\n$/);
   });
 
   test('notify reports an expired token with exit 1 and a setup hint', async () => {
     await command({ type: 'reset', sendResult: { ret: -14 } });
-    failure(run('notify.mjs', ['hello']), 1, /expired.*setup\.mjs/);
+    failure(run('notify.mjs', ['hello']), 1, /expired.*setup\.mjs wechat/);
   });
 
   test('notify rejects empty input, unknown options, and missing option values', () => {
@@ -535,7 +537,7 @@ if (!isMainThread) {
       const result = run('inbox.mjs', ['--title', 'B']);
       assert.equal(result.status, 0);
       assert.equal(result.stdout, `[${stamp}]\nBefore ${incident}\n---\n[${stamp}] re: "B"\nAfter ${incident}\n`);
-      assert.match(result.stderr, /^wechat: [^\r\n]*queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
+      assert.match(result.stderr, /^ask-human: [^\r\n]*queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
       const files = fs.readdirSync(session('B')).filter(name => name.startsWith('queue.jsonl.corrupt.'));
       assert.equal(files.length, incident + 1);
       const fresh = files.find(name => !quarantined.includes(name));
@@ -561,7 +563,7 @@ if (!isMainThread) {
     const result = run('inbox.mjs', ['--title', 'B']);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, '');
-    assert.match(result.stderr, /^wechat: [^\r\n]*queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
+    assert.match(result.stderr, /^ask-human: [^\r\n]*queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
     const files = fs.readdirSync(session('B')).filter(name => name.startsWith('queue.jsonl.corrupt.'));
     assert.equal(files.length, 1);
     assert.equal(fs.readFileSync(path.join(session('B'), files[0]), 'utf8'), raw);
@@ -642,8 +644,12 @@ if (!isMainThread) {
   });
 
   test('inbox reports missing configuration with exit 2', () => {
+    fs.rmSync(path.join(dir, 'config.json'));
     fs.rmSync(path.join(dir, 'wechat.json'));
-    failure(run('inbox.mjs'), 2, /setup\.mjs/);
+    failure(run('inbox.mjs'), 2, /not configured — run: node \S*setup\.mjs wechat\n$/);
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
+    fs.writeFileSync(path.join(dir, 'wechat.json'), '{');
+    failure(run('inbox.mjs'), 2, /wechat not configured — run: node \S*setup\.mjs wechat\n$/);
   });
 
   test('notify reuses the context token received by an earlier inbox process', async () => {
@@ -676,5 +682,44 @@ if (!isMainThread) {
     });
     assert.ifError(result.error);
     success(result);
+  });
+
+  test('setup without a valid channel argument lists channels and touches neither disk nor network', async () => {
+    const listing = /^ask-human: usage: setup\.mjs CHANNEL — channels: wechat \(configured\) \(active\)\n$/;
+    for (const args of [[], ['telegram'], ['wechat', 'extra'], ['--help'], ['--channel', 'wechat']]) {
+      const result = run('setup.mjs', args, 'typed input\n');
+      failure(result, 1, listing);
+      assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'wechat.json']);
+    }
+    fs.rmSync(path.join(dir, 'config.json'));
+    failure(run('setup.mjs'), 1, /^ask-human: usage: setup\.mjs CHANNEL — channels: wechat \(configured\)\n$/);
+    assert.deepEqual(fs.readdirSync(dir), ['wechat.json']);
+    fs.rmSync(path.join(dir, 'wechat.json'));
+    failure(run('setup.mjs'), 1, /^ask-human: usage: setup\.mjs CHANNEL — channels: wechat\n$/);
+    assert.deepEqual(fs.readdirSync(dir), []);
+    assert.equal((await command({ type: 'requests' })).length, 0);
+  });
+
+  test('config.json is required and invalid active channels never send or receive', async () => {
+    await command({ type: 'reset', updates: [{ msgs: [message('hello')], get_updates_buf: 'CURSOR_PLACEHOLDER' }] });
+    fs.rmSync(path.join(dir, 'config.json'));
+    failure(run('notify.mjs', ['hello']), 2, /not configured.*setup\.mjs wechat/);
+    failure(run('inbox.mjs'), 2, /not configured.*setup\.mjs wechat/);
+    assert.deepEqual(fs.readdirSync(dir), ['wechat.json']);
+    assert.equal((await command({ type: 'requests' })).length, 0);
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
+    success(run('notify.mjs', ['hello']));
+    success(run('inbox.mjs'), `[${stamp}]\nhello\n`);
+    assert.equal((await command({ type: 'requests' })).length, 2);
+    for (const pointer of ['{', '{"channel":"telegram"}', '{"channel":5}', '[]']) {
+      fs.writeFileSync(path.join(dir, 'config.json'), pointer);
+      failure(run('notify.mjs', ['hello']), 2, /config\.json.*setup\.mjs wechat/);
+      failure(run('inbox.mjs'), 2, /config\.json.*setup\.mjs wechat/);
+    }
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
+    fs.rmSync(path.join(dir, 'wechat.json'));
+    failure(run('notify.mjs', ['hello']), 2, /wechat\.json.*setup\.mjs wechat/);
+    failure(run('inbox.mjs'), 2, /wechat\.json.*setup\.mjs wechat/);
+    assert.equal((await command({ type: 'requests' })).length, 2);
   });
 }

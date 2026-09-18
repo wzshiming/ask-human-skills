@@ -1,43 +1,44 @@
 import { createInterface } from 'node:readline/promises';
-import { parseArgs } from 'node:util';
-import { CliError, drain, loadState, login, paths, resetState, saveConfig, sendText } from './_lib.mjs';
-import { qrMatrix, renderQr } from './_qr.mjs';
+import {
+  CHANNELS,
+  CliError,
+  activeChannel,
+  configured,
+  paths,
+  resetState,
+  saveActive,
+  saveConfig,
+  useChannel,
+} from './_lib.mjs';
+
+function usage() {
+  let active;
+  try {
+    active = activeChannel();
+  } catch {}
+  const list = CHANNELS.map(
+    name => `${name}${configured(name) ? ' (configured)' : ''}${name === active ? ' (active)' : ''}`,
+  );
+  return new CliError(`usage: setup.mjs CHANNEL — channels: ${list.join(', ')}`);
+}
 
 async function main() {
-  parseArgs({ options: {}, allowPositionals: false, strict: true });
+  const [name, ...extra] = process.argv.slice(2);
+  if (!CHANNELS.includes(name) || extra.length) throw usage();
+  const adapter = await useChannel(name);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    console.log('WeChat setup for ask-human. Scan the QR code with WeChat and confirm on your phone.');
-    const creds = await login({
-      out: line => console.log(line),
-      ask: question => rl.question(question),
-      onQr: url => {
-        process.stdout.write(renderQr(qrMatrix(url)));
-        console.log(`If the QR code above is not scannable, open this URL in a browser and scan it there:\n${url}\n`);
-      },
-    });
     resetState();
-    const cfg = { ...creds };
-    console.log(
-      `Logged in (bot ${cfg.botId}). Now send the bot any message in WeChat \u2014 it appears as a new chat there.`,
-    );
-    const first = await drain(cfg, { waitSec: 600, since: Date.now() - 60_000 });
-    cfg.userId ||= first[0].from;
+    const cfg = await adapter.setup({ out: line => console.log(line), ask: question => rl.question(question) });
     saveConfig(cfg);
-    console.log(`Paired with WeChat user ${cfg.userId}.`);
-    await sendText(cfg, 'ask-human: WeChat is connected. Reply to this message to finish setup.', {
-      contextToken: loadState().contextToken,
-    });
-    console.log('Test message sent. Reply to it in WeChat (waiting up to 10 minutes)\u2026');
-    const reply = await drain(cfg, { waitSec: 600 });
-    console.log(`Reply received: ${JSON.stringify(reply[0].text.split('\n')[0])}`);
-    console.log(`Config written to ${paths().configFile}`);
+    saveActive(name);
+    console.log(`Config written to ${paths().configFile}; active channel: ${name}`);
   } finally {
     rl.close();
   }
 }
 
 main().catch(err => {
-  process.stderr.write(`${err instanceof CliError ? err.message : `wechat: ${err.message}`}\n`);
+  process.stderr.write(`${err instanceof CliError ? err.message : `ask-human: ${err.message}`}\n`);
   process.exit(err.exitCode ?? 1);
 });
