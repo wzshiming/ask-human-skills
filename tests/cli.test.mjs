@@ -74,7 +74,7 @@ if (!isMainThread) {
     }
   });
 } else {
-  const scripts = fileURLToPath(new URL('../skills/wechat/scripts/', import.meta.url));
+  const scripts = fileURLToPath(new URL('../skills/ask-human/scripts/', import.meta.url));
   const dirs = [];
   let worker;
   let baseUrl;

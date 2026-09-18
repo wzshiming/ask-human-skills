@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const lib = await import(new URL('../skills/wechat/scripts/_lib.mjs', import.meta.url));
+const lib = await import(new URL('../skills/ask-human/scripts/_lib.mjs', import.meta.url));
 const originalFetch = globalThis.fetch;
 const originalDir = process.env.ASK_HUMAN_DIR;
 let tempDir;
@@ -41,7 +41,7 @@ test('config and state use dynamic paths, secure atomic writes, and safe default
   assert.equal(lib.CHUNK_LIMIT, 4000);
   assert.equal(
     lib.SETUP_SCRIPT,
-    path.resolve(path.dirname(new URL('../skills/wechat/scripts/_lib.mjs', import.meta.url).pathname), 'setup.mjs'),
+    path.resolve(path.dirname(new URL('../skills/ask-human/scripts/_lib.mjs', import.meta.url).pathname), 'setup.mjs'),
   );
   assert.deepEqual(lib.paths(), {
     dir: tempDir,
