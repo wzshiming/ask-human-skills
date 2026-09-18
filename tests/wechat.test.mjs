@@ -15,6 +15,13 @@ let responses;
 const response = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
 const isError = (code, pattern) => error =>
   error instanceof lib.CliError && error.exitCode === code && pattern.test(error.message);
+const setupHint = `ask the human to run setup as described in ${new URL('../skills/ask-human/README.md', import.meta.url).pathname}#setup`;
+const expired = error =>
+  error instanceof lib.CliError &&
+  error.exitCode === 1 &&
+  error.fatal === true &&
+  error.message === `ask-human: credentials expired or revoked — ${setupHint}`;
+const rejected = /^ask-human: messaging service rejected the request$/;
 
 beforeEach(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-adapter-test-'));
@@ -80,19 +87,14 @@ test('apiPost sends JSON to a trailing-slash base and apiGet handles status erro
   assert.equal(calls[0].headers.Authorization, `Bearer ${cfg.token}`);
   for (const scripted of [response({ ret: -14 }), response({ errcode: -14 }), response({}, 401)]) {
     responses.push(scripted);
-    await assert.rejects(wechat.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), error => {
-      assert.ok(isError(1, /expired.*run: node \S*setup\.mjs wechat/)(error), error.message);
-      assert.equal(error.fatal, true);
-      return true;
-    });
+    await assert.rejects(wechat.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), expired);
   }
   responses.push(response({}, 429, { 'Retry-After': '0' }), response({ ret: 0 }));
   assert.deepEqual(await wechat.apiGet('https://example.invalid/retry'), { ret: 0 });
   for (const scripted of [response({}, 500), response({ ret: 5, errmsg: 'bad\nrequest' }), response({ errcode: 6 })]) {
     responses.push(scripted);
     await assert.rejects(wechat.apiGet('https://example.invalid/error'), error => {
-      assert.ok(isError(1, /HTTP 500|ret=5|errcode=6/)(error));
-      assert.equal(error.message.includes('\n'), false);
+      assert.ok(isError(1, /^ask-human: messaging service (returned HTTP 500|rejected the request)$/)(error));
       assert.equal(error.fatal, undefined);
       return true;
     });
@@ -117,37 +119,38 @@ test('apiPost sends JSON to a trailing-slash base and apiGet handles status erro
   responses.push(new Response('not JSON'));
   await assert.rejects(wechat.apiGet('https://example.invalid/json'), isError(1, /invalid JSON/));
   responses.push(new Response('proxy saw Bearer TOKEN_PLACEHOLDER', { status: 500 }));
-  await assert.rejects(wechat.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), error => {
-    assert.equal(error.message.includes('TOKEN_PLACEHOLDER'), false);
-    assert.match(error.message, /HTTP 500: proxy saw Bearer \*\*\*/);
-    return true;
-  });
-  responses.push(response({ ret: 9, errmsg: 'token TOKEN_PLACEHOLDER rejected' }));
-  await assert.rejects(wechat.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }), error => {
-    assert.match(error.message, /ret=9 errcode=undefined token \*\*\* rejected/);
-    return true;
-  });
+  await assert.rejects(
+    wechat.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }),
+    isError(1, /^ask-human: messaging service returned HTTP 500$/),
+  );
+  responses.push(response({ ret: 9, errmsg: 'token TOKEN_PLACEHOLDER rejected by iLink' }));
+  await assert.rejects(
+    wechat.apiPost(cfg.baseUrl, 'ilink/bot/sendmessage', {}, { token: cfg.token }),
+    isError(1, rejected),
+  );
   responses.push(new TypeError('network\nfailure'));
-  await assert.rejects(wechat.apiGet('https://example.invalid/network'), isError(1, /network failure/));
+  await assert.rejects(
+    wechat.apiGet('https://example.invalid/network'),
+    isError(1, /^ask-human: messaging service request failed$/),
+  );
   await assert.rejects(
     wechat.apiPost('not a url', 'ilink/bot/sendmessage', {}, { token: cfg.token }),
-    isError(1, /URL/),
+    isError(1, /^ask-human: messaging service request failed$/),
   );
 });
 
 test('fetch reports expired credentials when an HTTP 401 body is interrupted', async () => {
   responses.push(
-    Object.assign(response({}, 401), {
-      text: async () => {
-        throw new DOMException('Response interrupted', 'AbortError');
-      },
-    }),
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(new TypeError('terminated'));
+        },
+      }),
+      { status: 401 },
+    ),
   );
-  await assert.rejects(wechat.fetch(cfg, {}, poll), error => {
-    assert.ok(isError(1, /expired.*setup\.mjs wechat/)(error), error.message);
-    assert.equal(error.fatal, true);
-    return true;
-  });
+  await assert.rejects(wechat.fetch(cfg, {}, poll), expired);
   assert.equal(calls.length, 1);
 });
 
@@ -158,7 +161,7 @@ test('apiPost handles rate limiting and preserves AbortError including actual ti
   assert.notEqual(calls[0].headers['X-WECHAT-UIN'], calls[1].headers['X-WECHAT-UIN']);
   for (const [scripted, pattern] of [
     [response({}, 500), /HTTP 500/],
-    [response({ ret: 5 }), /ret=5/],
+    [response({ ret: 5 }), rejected],
   ]) {
     responses.push(scripted);
     await assert.rejects(
@@ -356,7 +359,7 @@ test('login retries polling network errors, AbortError and gateway 5xx, but fail
   responses.push(qr(), response({}, 404));
   await assert.rejects(wechat.login(options), isError(1, /HTTP 404/));
   responses.push(qr(), response({ ret: 7 }));
-  await assert.rejects(wechat.login(options), isError(1, /ret=7/));
+  await assert.rejects(wechat.login(options), isError(1, rejected));
 });
 
 test('login rejects blocked codes, bound bots, incomplete confirmation, and exhausted refreshes', async () => {

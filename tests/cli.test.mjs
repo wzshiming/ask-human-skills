@@ -96,9 +96,9 @@ if (!isMainThread) {
     });
   }
 
-  function run(script, args = [], input = '') {
+  function run(script, args = [], input = '', env = {}) {
     const result = spawnSync(process.execPath, [path.join(scripts, script), ...args], {
-      env: { ...process.env, ASK_HUMAN_DIR: dir },
+      env: { ...process.env, ASK_HUMAN_DIR: dir, ...env },
       input,
       encoding: 'utf8',
       timeout: 8000,
@@ -119,6 +119,11 @@ if (!isMainThread) {
     assert.equal(result.stdout, '');
     assert.match(result.stderr, /^[^\r\n]+\n$/);
     assert.match(result.stderr, message);
+  }
+
+  function handoff(result, problem) {
+    failure(result, 2, /^ask-human: /);
+    assert.equal(result.stderr, `ask-human: ${problem} — ${setupHint}\n`);
   }
 
   function start(args) {
@@ -150,6 +155,7 @@ if (!isMainThread) {
   const quoted = (text, title, overrides = {}) =>
     message(text, { item_list: [{ type: 1, text_item: { text }, ref_msg: { title } }], ...overrides });
   const hint = 'Reply by quoting this message; other questions are open.';
+  const setupHint = `ask the human to run setup as described in ${path.join(scripts, '..', 'README.md')}#setup`;
 
   const time = new Date(2026, 8, 15, 10, 23).getTime();
   const pad = number => String(number).padStart(2, '0');
@@ -246,12 +252,32 @@ if (!isMainThread) {
   test('notify reports missing configuration with exit 2 and a setup hint', () => {
     fs.rmSync(path.join(dir, 'config.json'));
     fs.rmSync(path.join(dir, 'wechat.json'));
-    failure(run('notify.mjs', ['hello']), 2, /not configured — run: node \S*setup\.mjs wechat\n$/);
+    handoff(run('notify.mjs', ['hello']), 'not configured');
   });
 
   test('notify reports an expired token with exit 1 and a setup hint', async () => {
-    await command({ type: 'reset', sendResult: { ret: -14 } });
-    failure(run('notify.mjs', ['hello']), 1, /expired.*setup\.mjs wechat/);
+    const errmsg = 'iLink wechat gateway rejected TOKEN_PLACEHOLDER at /ilink/bot/sendmessage';
+    for (const sendResult of [
+      { ret: -14, errmsg },
+      { errcode: -14, errmsg },
+      { status: 401, errmsg },
+    ]) {
+      await command({ type: 'reset', sendResult });
+      const result = run('notify.mjs', ['hello']);
+      failure(result, 1, /expired/);
+      assert.equal(result.stderr, `ask-human: credentials expired or revoked — ${setupHint}\n`);
+    }
+  });
+
+  test('runtime diagnostics: provider and HTTP failures name neither endpoint, body, nor protocol fields', async () => {
+    const errmsg = 'iLink wechat gateway rejected TOKEN_PLACEHOLDER at /ilink/bot/sendmessage';
+    await command({ type: 'reset', sendResult: { ret: 5, errmsg }, updates: [{ errcode: 6, errmsg }] });
+    failure(run('notify.mjs', ['hello']), 1, /^ask-human: messaging service rejected the request\n$/);
+    failure(run('inbox.mjs'), 1, /^ask-human: messaging service rejected the request\n$/);
+    await command({ type: 'reset', sendResult: { status: 500, errmsg }, updates: [{ status: 503, errmsg }] });
+    failure(run('notify.mjs', ['hello']), 1, /^ask-human: messaging service returned HTTP 500\n$/);
+    failure(run('inbox.mjs'), 1, /^ask-human: messaging service returned HTTP 503\n$/);
+    assert.equal((await command({ type: 'requests' })).length, 2);
   });
 
   test('notify rejects empty input, unknown options, and missing option values', () => {
@@ -537,12 +563,13 @@ if (!isMainThread) {
       const result = run('inbox.mjs', ['--title', 'B']);
       assert.equal(result.status, 0);
       assert.equal(result.stdout, `[${stamp}]\nBefore ${incident}\n---\n[${stamp}] re: "B"\nAfter ${incident}\n`);
-      assert.match(result.stderr, /^ask-human: [^\r\n]*queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
+      assert.match(result.stderr, /^ask-human: corrupt queue preserved as queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
       const files = fs.readdirSync(session('B')).filter(name => name.startsWith('queue.jsonl.corrupt.'));
       assert.equal(files.length, incident + 1);
       const fresh = files.find(name => !quarantined.includes(name));
       assert.ok(fresh);
-      assert.ok(result.stderr.includes(path.join(session('B'), fresh)));
+      assert.ok(result.stderr.includes(fresh));
+      assert.equal(result.stderr.includes(dir), false);
       assert.deepEqual(fs.readFileSync(path.join(session('B'), fresh)), queued);
       assert.ok(queued.subarray(0, Buffer.byteLength(torn)).equals(Buffer.from(torn)));
       quarantined.push(fresh);
@@ -563,9 +590,11 @@ if (!isMainThread) {
     const result = run('inbox.mjs', ['--title', 'B']);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, '');
-    assert.match(result.stderr, /^ask-human: [^\r\n]*queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
+    assert.match(result.stderr, /^ask-human: corrupt queue preserved as queue\.jsonl\.corrupt\.[^\r\n]+\n$/);
+    assert.equal(result.stderr.includes(dir), false);
     const files = fs.readdirSync(session('B')).filter(name => name.startsWith('queue.jsonl.corrupt.'));
     assert.equal(files.length, 1);
+    assert.ok(result.stderr.includes(files[0]));
     assert.equal(fs.readFileSync(path.join(session('B'), files[0]), 'utf8'), raw);
     assert.equal((await polls()).length, 0);
   });
@@ -643,13 +672,23 @@ if (!isMainThread) {
     failure(run('inbox.mjs', ['--bogus']), 1, /Unknown option/);
   });
 
-  test('inbox reports missing configuration with exit 2', () => {
+  test('notify and inbox report missing configuration and incomplete credentials with exit 2 and no API call', async () => {
     fs.rmSync(path.join(dir, 'config.json'));
     fs.rmSync(path.join(dir, 'wechat.json'));
-    failure(run('inbox.mjs'), 2, /not configured — run: node \S*setup\.mjs wechat\n$/);
+    handoff(run('inbox.mjs'), 'not configured');
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
-    fs.writeFileSync(path.join(dir, 'wechat.json'), '{');
-    failure(run('inbox.mjs'), 2, /wechat not configured — run: node \S*setup\.mjs wechat\n$/);
+    const complete = { token: 'TOKEN_PLACEHOLDER', baseUrl, userId: 'USER_PLACEHOLDER' };
+    const incomplete = ['{', '{}'];
+    for (const key of ['token', 'baseUrl', 'userId']) {
+      const { [key]: _, ...rest } = complete;
+      incomplete.push(JSON.stringify(rest), JSON.stringify({ ...complete, [key]: '' }));
+    }
+    for (const raw of incomplete) {
+      fs.writeFileSync(path.join(dir, 'wechat.json'), raw);
+      handoff(run('notify.mjs', ['hello']), 'invalid configuration');
+      handoff(run('inbox.mjs'), 'invalid configuration');
+    }
+    assert.equal((await command({ type: 'requests' })).length, 0);
   });
 
   test('notify reuses the context token received by an earlier inbox process', async () => {
@@ -703,8 +742,8 @@ if (!isMainThread) {
   test('config.json is required and invalid active channels never send or receive', async () => {
     await command({ type: 'reset', updates: [{ msgs: [message('hello')], get_updates_buf: 'CURSOR_PLACEHOLDER' }] });
     fs.rmSync(path.join(dir, 'config.json'));
-    failure(run('notify.mjs', ['hello']), 2, /not configured.*setup\.mjs wechat/);
-    failure(run('inbox.mjs'), 2, /not configured.*setup\.mjs wechat/);
+    handoff(run('notify.mjs', ['hello']), 'not configured');
+    handoff(run('inbox.mjs'), 'not configured');
     assert.deepEqual(fs.readdirSync(dir), ['wechat.json']);
     assert.equal((await command({ type: 'requests' })).length, 0);
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
@@ -713,13 +752,101 @@ if (!isMainThread) {
     assert.equal((await command({ type: 'requests' })).length, 2);
     for (const pointer of ['{', '{"channel":"telegram"}', '{"channel":5}', '[]']) {
       fs.writeFileSync(path.join(dir, 'config.json'), pointer);
-      failure(run('notify.mjs', ['hello']), 2, /config\.json.*setup\.mjs wechat/);
-      failure(run('inbox.mjs'), 2, /config\.json.*setup\.mjs wechat/);
+      handoff(run('notify.mjs', ['hello']), 'invalid configuration');
+      handoff(run('inbox.mjs'), 'invalid configuration');
     }
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ channel: 'wechat' }));
     fs.rmSync(path.join(dir, 'wechat.json'));
-    failure(run('notify.mjs', ['hello']), 2, /wechat\.json.*setup\.mjs wechat/);
-    failure(run('inbox.mjs'), 2, /wechat\.json.*setup\.mjs wechat/);
+    handoff(run('notify.mjs', ['hello']), 'not configured');
+    handoff(run('inbox.mjs'), 'not configured');
     assert.equal((await command({ type: 'requests' })).length, 2);
+  });
+
+  test('runtime diagnostics: native storage, stdin and network errors keep syscall and errno but no path', async () => {
+    fs.writeFileSync(path.join(dir, 'wechat'), 'not a directory');
+    for (const result of [run('notify.mjs', ['hello']), run('inbox.mjs', ['--title', 'A'])]) {
+      failure(result, 1, /^ask-human: mkdir failed \(ENOTDIR\)\n$/);
+      assert.equal(result.stderr.includes(dir), false);
+    }
+    fs.rmSync(path.join(dir, 'wechat'));
+    const fd = fs.openSync(dir, 'r');
+    try {
+      const result = spawnSync(process.execPath, [path.join(scripts, 'notify.mjs')], {
+        env: { ...process.env, ASK_HUMAN_DIR: dir },
+        stdio: [fd, 'pipe', 'pipe'],
+        encoding: 'utf8',
+        timeout: 8000,
+      });
+      assert.ifError(result.error);
+      failure(result, 1, /^ask-human: read failed \(EISDIR\)\n$/);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const closed = http.createServer();
+    await new Promise(resolve => closed.listen(0, '127.0.0.1', resolve));
+    const { port } = closed.address();
+    await new Promise(resolve => closed.close(resolve));
+    fs.writeFileSync(
+      path.join(dir, 'wechat.json'),
+      JSON.stringify({ token: 'TOKEN_PLACEHOLDER', baseUrl: `http://127.0.0.1:${port}/`, userId: 'USER_PLACEHOLDER' }),
+    );
+    failure(run('notify.mjs', ['hello']), 1, /^ask-human: connect failed \(ECONNREFUSED\)\n$/);
+  });
+
+  test('runtime diagnostics: request validation never exposes configured credentials or endpoints', async () => {
+    const withCredentials = new URL(baseUrl);
+    withCredentials.username = 'USER_PLACEHOLDER';
+    withCredentials.password = 'SECRET_PLACEHOLDER';
+    withCredentials.pathname = '/wechat/';
+    for (const [token, url] of [
+      ['TOKEN_PLACEHOLDER\r\nX-Injected: SECRET_PLACEHOLDER', baseUrl],
+      ['TOKEN_PLACEHOLDER', withCredentials.href],
+      ['TOKEN_PLACEHOLDER', '/wechat/'],
+      ['TOKEN_PLACEHOLDER\u{1F511}', baseUrl],
+    ]) {
+      fs.writeFileSync(
+        path.join(dir, 'wechat.json'),
+        JSON.stringify({ token, baseUrl: url, userId: 'USER_PLACEHOLDER' }),
+      );
+      for (const result of [run('notify.mjs', ['hello']), run('inbox.mjs')]) {
+        assert.doesNotMatch(result.stderr, /PLACEHOLDER|wechat|ilink|Bearer/);
+        failure(result, 1, /^ask-human: messaging service request failed\n$/);
+      }
+    }
+    assert.equal((await command({ type: 'requests' })).length, 0);
+  });
+
+  test('runtime diagnostics: an invalid recovery batch is reported by name only and left in place', async () => {
+    const recovery = path.join(dir, 'wechat/recovery');
+    fs.mkdirSync(recovery, { recursive: true });
+    const name = '0000000000000001-000000000000000000000001-0000000000000000.json';
+    for (const raw of ['ilink garbage', '{"targets":"ilink"}']) {
+      fs.writeFileSync(path.join(recovery, name), raw);
+      const result = run('inbox.mjs');
+      failure(result, 1, /invalid recovery batch/);
+      assert.equal(result.stderr, `ask-human: invalid recovery batch ${name}\n`);
+      assert.equal(fs.readFileSync(path.join(recovery, name), 'utf8'), raw);
+    }
+    assert.equal((await polls()).length, 0);
+    assert.equal(fs.existsSync(path.join(dir, 'wechat/poll.lock')), false);
+  });
+
+  test('runtime diagnostics: raw provider messages reach stderr only with ASK_HUMAN_DEBUG=1', async () => {
+    const msgs = [message('WeChat says hi')];
+    await command({ type: 'reset', updates: [{ msgs }, { msgs }] });
+    success(run('inbox.mjs'), `[${stamp}]\nWeChat says hi\n`);
+    const result = run('inbox.mjs', [], '', { ASK_HUMAN_DEBUG: '1' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `[${stamp}]\nWeChat says hi\n`);
+    assert.equal(result.stderr, `${JSON.stringify(msgs)}\n`);
+  });
+
+  test('runtime diagnostics: channel words inside messages are delivered verbatim', async () => {
+    const text = 'WeChat iLink /ilink/bot/sendmessage wechat.json ret=5 errcode=-14';
+    await command({ type: 'reset', updates: [{ msgs: [message(text)] }] });
+    success(run('notify.mjs', ['--title', 'WeChat task', text]));
+    success(run('inbox.mjs'), `[${stamp}]\n${text}\n`);
+    const requests = await command({ type: 'requests' });
+    assert.equal(requests[0].body.msg.item_list[0].text_item.text, `WeChat task\n${text}`);
   });
 }

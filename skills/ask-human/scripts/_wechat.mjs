@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { CliError, SETUP_SCRIPT, cliError, drain, request, send as deliver } from './_lib.mjs';
+import { CliError, SETUP_HINT, cliError, drain, request, send as deliver } from './_lib.mjs';
 import { qrMatrix, renderQr } from './_qr.mjs';
 
 export const label = 'WeChat';
@@ -7,8 +7,7 @@ export const textLimit = 4000;
 export const configKeys = ['token', 'baseUrl', 'userId'];
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
-const expired = () =>
-  Object.assign(new CliError(`bot token expired or revoked — run: node ${SETUP_SCRIPT} wechat`), { fatal: true });
+const expired = () => Object.assign(new CliError(`credentials expired or revoked — ${SETUP_HINT}`), { fatal: true });
 
 export function headers(token) {
   return {
@@ -19,27 +18,22 @@ export function headers(token) {
   };
 }
 
-async function api(url, options, { token = '', timeoutMs, deadline }) {
+async function api(url, options, { timeoutMs, deadline }) {
   let result;
   try {
-    result = await request(url, options, { timeoutMs, deadline, redact: token });
+    result = await request(url, options, { timeoutMs, deadline });
   } catch (error) {
     throw error.status === 401 ? expired() : error;
   }
   if (result?.ret === -14 || result?.errcode === -14) throw expired();
-  if ((result?.ret != null && result.ret !== 0) || (result?.errcode != null && result.errcode !== 0)) {
-    const detail = String(result.errmsg ?? '');
-    throw new CliError(
-      `${new URL(url).pathname} ret=${result.ret} errcode=${result.errcode} ${token ? detail.replaceAll(token, '***') : detail}`,
-    );
-  }
+  if ((result?.ret != null && result.ret !== 0) || (result?.errcode != null && result.errcode !== 0))
+    throw new CliError('messaging service rejected the request');
   return result;
 }
 
 export async function apiPost(baseUrl, endpoint, body, { token, timeoutMs = 15000, deadline = Date.now() + 600000 }) {
   const url = `${baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`}${endpoint}`;
   return api(url, () => ({ method: 'POST', headers: headers(token), body: JSON.stringify(body) }), {
-    token,
     timeoutMs,
     deadline,
   });
