@@ -15,6 +15,9 @@ let responses;
 const response = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
 const isError = (code, pattern) => error =>
   error instanceof lib.CliError && error.exitCode === code && pattern.test(error.message);
+const setupHint = `ask the human to run setup as described in ${new URL('../skills/ask-human/README.md', import.meta.url).pathname}#setup`;
+const handoff = (code, problem) => error =>
+  error instanceof lib.CliError && error.exitCode === code && error.message === `ask-human: ${problem} — ${setupHint}`;
 
 beforeEach(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-lib-test-'));
@@ -57,13 +60,13 @@ test('channel registry requires an explicit active channel even with existing cr
   assert.equal(lib.paths('other').configFile, path.join(tempDir, 'other.json'));
   assert.equal(lib.paths('other').stateDir, path.join(tempDir, 'other'));
   assert.equal(lib.paths('other').pointerFile, pointerFile);
-  assert.throws(() => lib.activeChannel(), isError(2, /not configured.*run: node \S*setup\.mjs wechat/));
+  assert.throws(() => lib.activeChannel(), handoff(2, 'not configured'));
   assert.equal(lib.configured('wechat'), false);
   assert.equal(fs.existsSync(tempDir) && fs.readdirSync(tempDir).length, 0);
   const config = { token: 'TOKEN_PLACEHOLDER', baseUrl: 'https://example.invalid', userId: 'USER_PLACEHOLDER' };
   lib.saveConfig(config);
   assert.equal(lib.configured('wechat'), true);
-  assert.throws(() => lib.activeChannel(), isError(2, /not configured.*run: node \S*setup\.mjs wechat/));
+  assert.throws(() => lib.activeChannel(), handoff(2, 'not configured'));
   assert.deepEqual(fs.readdirSync(tempDir), ['wechat.json']);
   lib.saveActive('wechat');
   assert.deepEqual(JSON.parse(fs.readFileSync(pointerFile, 'utf8')), { channel: 'wechat' });
@@ -71,15 +74,15 @@ test('channel registry requires an explicit active channel even with existing cr
   assert.equal(lib.activeChannel(), 'wechat');
   for (const pointer of ['{', '[]', 'null', '"wechat"', '{"channel":"telegram"}', '{"channel":5}', '{}']) {
     fs.writeFileSync(pointerFile, pointer);
-    assert.throws(() => lib.activeChannel(), isError(2, /config\.json.*setup\.mjs/));
+    assert.throws(() => lib.activeChannel(), handoff(2, 'invalid configuration'));
   }
   fs.rmSync(pointerFile);
   fs.mkdirSync(pointerFile);
-  assert.throws(() => lib.activeChannel(), isError(2, /config\.json.*setup\.mjs/));
+  assert.throws(() => lib.activeChannel(), handoff(2, 'invalid configuration'));
   fs.rmdirSync(pointerFile);
   fs.writeFileSync(pointerFile, '{"channel":"wechat"}');
   fs.rmSync(configFile);
-  assert.throws(() => lib.activeChannel(), isError(2, /wechat\.json.*setup\.mjs wechat/));
+  assert.throws(() => lib.activeChannel(), handoff(2, 'not configured'));
   assert.equal(fs.existsSync(configFile), false);
 });
 
@@ -101,7 +104,7 @@ test('config and state use dynamic paths, secure atomic writes, and safe default
     sessionsDir: path.join(tempDir, 'wechat/sessions'),
     recoveryDir: path.join(tempDir, 'wechat/recovery'),
   });
-  assert.throws(() => lib.loadConfig(), isError(2, /wechat.*run: node \S*setup\.mjs wechat/));
+  assert.throws(() => lib.loadConfig(), handoff(2, 'invalid configuration'));
   assert.deepEqual(lib.loadState(), {});
   const config = {
     token: 'TOKEN_PLACEHOLDER',
@@ -120,10 +123,10 @@ test('config and state use dynamic paths, secure atomic writes, and safe default
   assert.equal(fs.statSync(lib.paths().stateDir).mode & 0o777, 0o700);
   assert.equal(fs.existsSync(`${lib.paths().stateFile}.tmp`), false);
   fs.writeFileSync(lib.paths().configFile, '{');
-  assert.throws(() => lib.loadConfig(), isError(2, /setup\.mjs/));
+  assert.throws(() => lib.loadConfig(), handoff(2, 'invalid configuration'));
   for (const key of ['token', 'baseUrl', 'userId']) {
     lib.saveConfig({ ...config, [key]: '' });
-    assert.throws(() => lib.loadConfig(), isError(2, /setup\.mjs/));
+    assert.throws(() => lib.loadConfig(), handoff(2, 'invalid configuration'));
   }
   fs.writeFileSync(lib.paths().stateFile, '{');
   assert.deepEqual(lib.loadState(), {});
@@ -135,7 +138,7 @@ test('config and state use dynamic paths, secure atomic writes, and safe default
   assert.deepEqual(lib.loadState(), { cursor: 5, contextToken: null });
   process.env.ASK_HUMAN_DIR = path.join(tempDir, 'other');
   assert.equal(lib.paths().dir, path.join(tempDir, 'other'));
-  assert.throws(() => lib.loadConfig(), isError(2, /setup\.mjs/));
+  assert.throws(() => lib.loadConfig(), handoff(2, 'invalid configuration'));
 });
 
 test('overlapping registrations of the same title use independent temporary files', context => {
@@ -169,7 +172,7 @@ const incoming = (text, extra = {}) => ({
 const quoted = (text, title, extra = {}) =>
   incoming(text, { item_list: [{ type: 1, text_item: { text }, ref_msg: { title } }], ...extra });
 
-test('request retries 429 with fresh options, keeps the HTTP status, redacts secrets, and rejects bad JSON', async () => {
+test('request retries 429 with fresh options, keeps the HTTP status, omits the body, and rejects bad JSON', async () => {
   let attempts = 0;
   responses.push(response({}, 429, { 'Retry-After': '0' }), response({ ok: 1 }));
   assert.deepEqual(
@@ -184,13 +187,12 @@ test('request retries 429 with fresh options, keeps the HTTP status, redacts sec
     ['1', '2'],
   );
   assert.equal(calls[0].method, 'GET');
-  responses.push(new Response('Bearer SECRET_PLACEHOLDER denied', { status: 401 }));
+  responses.push(new Response('Bearer SECRET_PLACEHOLDER denied at /ilink/bot/sendmessage', { status: 401 }));
   await assert.rejects(
-    lib.request('https://example.invalid/a/b?token=SECRET_PLACEHOLDER', () => ({}), { redact: 'SECRET_PLACEHOLDER' }),
+    lib.request('https://example.invalid/a/b?token=SECRET_PLACEHOLDER', () => ({})),
     error => {
-      assert.ok(isError(1, /HTTP 401: Bearer \*\*\* denied/)(error), error.message);
+      assert.ok(isError(1, /^ask-human: messaging service returned HTTP 401$/)(error), error.message);
       assert.equal(error.status, 401);
-      assert.equal(error.message.includes('SECRET_PLACEHOLDER'), false);
       return true;
     },
   );
@@ -199,12 +201,13 @@ test('request retries 429 with fresh options, keeps the HTTP status, redacts sec
     lib.request('https://example.invalid/json', () => ({})),
     isError(1, /invalid JSON/),
   );
-  responses.push(new TypeError('network\nfailure'));
+  const networkFailure = new TypeError('network\nfailure');
+  responses.push(networkFailure);
   await assert.rejects(
     lib.request('https://example.invalid/network', () => ({})),
     error => {
-      assert.ok(isError(1, /network failure/)(error));
-      assert.ok(error.cause instanceof TypeError);
+      assert.ok(isError(1, /^ask-human: messaging service request failed$/)(error));
+      assert.equal(error.cause, networkFailure);
       return true;
     },
   );
@@ -232,7 +235,11 @@ test('request retries 429 with fresh options, keeps the HTTP status, redacts sec
   );
   await assert.rejects(
     lib.request('not a url', () => ({})),
-    isError(1, /URL/),
+    error => {
+      assert.ok(isError(1, /^ask-human: messaging service request failed$/)(error));
+      assert.equal(error.cause.code, 'ERR_INVALID_URL');
+      return true;
+    },
   );
 });
 
@@ -702,7 +709,7 @@ test('drain backs off transient errors and preserves token-expiry failures', asy
   assert.equal(calls.length, 5);
   responses.length = 0;
   responses.push(response({ ret: -14 }));
-  await assert.rejects(lib.drain(cfg, { waitSec: 10 }), isError(1, /expired.*setup\.mjs wechat/));
+  await assert.rejects(lib.drain(cfg, { waitSec: 10 }), handoff(1, 'credentials expired or revoked'));
 });
 
 test('drain rethrows last error when no poll succeeded before deadline', async context => {
@@ -1438,6 +1445,6 @@ test('F4 failed handover preserves the entire corrupt claim for an ordered retry
   assert.equal(fs.readFileSync(path.join(dir, corrupt[0]), 'utf8'), raw);
   assert.equal(fs.existsSync(claim), false);
   assert.equal(warnings.length, 1);
-  assert.ok(warnings[0].includes(path.join(dir, corrupt[0])));
+  assert.equal(warnings[0], `ask-human: corrupt queue preserved as ${corrupt[0]}\n`);
   assert.equal(calls.length, 0);
 });

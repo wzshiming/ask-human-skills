@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import {
   CliError,
   activeChannel,
+  cliError,
   formatOutgoing,
   loadConfig,
   registerSession,
@@ -31,6 +32,7 @@ async function main() {
 }
 
 main().catch(err => {
-  process.stderr.write(`${err instanceof CliError ? err.message : `ask-human: ${err.message}`}\n`);
-  process.exit(err.exitCode ?? 1);
+  const error = cliError(err);
+  process.stderr.write(`${error instanceof CliError ? error.message : `ask-human: ${error.message}`}\n`);
+  process.exit(error.exitCode ?? 1);
 });

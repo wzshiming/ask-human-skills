@@ -18,6 +18,7 @@ export class CliError extends Error {
 
 export const EXIT = { OK: 0, FAIL: 1, NOT_CONFIGURED: 2, TIMEOUT: 124 };
 export const SETUP_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'setup.mjs');
+export const SETUP_HINT = `ask the human to run setup as described in ${fileURLToPath(new URL('../README.md', import.meta.url))}#setup`;
 export const CHANNELS = ['wechat'];
 
 let current;
@@ -38,7 +39,7 @@ export function channel() {
 
 const baseDir = () => process.env.ASK_HUMAN_DIR || path.join(os.homedir(), '.config', 'ask-human');
 const pointerFile = () => path.join(baseDir(), 'config.json');
-const setupHint = name => `run: node ${SETUP_SCRIPT} ${name}`;
+const notConfigured = problem => new CliError(`${problem} — ${SETUP_HINT}`, EXIT.NOT_CONFIGURED);
 
 export function paths(name = current) {
   const dir = baseDir();
@@ -63,35 +64,29 @@ function writeJson(file, value) {
     fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
     fs.renameSync(temporary, file);
   } catch (error) {
-    throw new CliError(error.message);
+    throw cliError(error);
   } finally {
-    fs.rmSync(temporary, { force: true });
+    try {
+      fs.rmSync(temporary, { force: true });
+    } catch {}
   }
 }
 
 export const configured = name => fs.existsSync(paths(name).configFile);
 
 export function activeChannel() {
-  const file = pointerFile();
-  const choice = CHANNELS.length === 1 ? CHANNELS[0] : `<${CHANNELS.join('|')}>`;
   let raw;
   try {
-    raw = fs.readFileSync(file, 'utf8');
+    raw = fs.readFileSync(pointerFile(), 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') throw new CliError(`not configured — ${setupHint(choice)}`, EXIT.NOT_CONFIGURED);
-    throw new CliError(`cannot read ${file}: ${error.message} — ${setupHint(choice)}`, EXIT.NOT_CONFIGURED);
+    throw notConfigured(error.code === 'ENOENT' ? 'not configured' : 'invalid configuration');
   }
   let name;
   try {
     name = JSON.parse(raw)?.channel;
   } catch {}
-  if (!CHANNELS.includes(name))
-    throw new CliError(
-      `invalid ${file} (available: ${CHANNELS.join(', ')}) — ${setupHint(choice)}`,
-      EXIT.NOT_CONFIGURED,
-    );
-  if (!configured(name))
-    throw new CliError(`${paths(name).configFile} missing — ${setupHint(name)}`, EXIT.NOT_CONFIGURED);
+  if (!CHANNELS.includes(name)) throw notConfigured('invalid configuration');
+  if (!configured(name)) throw notConfigured('not configured');
   return name;
 }
 
@@ -104,7 +99,7 @@ export function loadConfig() {
     const config = JSON.parse(fs.readFileSync(paths().configFile, 'utf8'));
     if (channel().configKeys.every(key => typeof config?.[key] === 'string' && config[key])) return config;
   } catch {}
-  throw new CliError(`${current} not configured — ${setupHint(current)}`, EXIT.NOT_CONFIGURED);
+  throw notConfigured('invalid configuration');
 }
 
 export function saveConfig(cfg) {
@@ -171,9 +166,12 @@ export function sessions() {
 }
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
-export function cliError(error) {
+export function cliError(error, fallback = error.message) {
   if (error instanceof CliError || error.name === 'AbortError') return error;
-  return Object.assign(new CliError(error.message), { cause: error });
+  const native = [error, error.cause].find(candidate => candidate?.syscall);
+  return Object.assign(new CliError(native ? `${native.syscall} failed (${native.code})` : fallback), {
+    cause: error,
+  });
 }
 
 const holds = new Set();
@@ -278,8 +276,7 @@ export async function withLock(fn, { deadline = Date.now() + 5000, file = paths(
   }
 }
 
-export async function request(url, options, { timeoutMs = 15000, deadline = Date.now() + 600000, redact = '' } = {}) {
-  const clean = text => (redact ? String(text).replaceAll(redact, '***') : String(text));
+export async function request(url, options, { timeoutMs = 15000, deadline = Date.now() + 600000 } = {}) {
   for (;;) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new DOMException('Request deadline elapsed', 'AbortError');
@@ -287,33 +284,31 @@ export async function request(url, options, { timeoutMs = 15000, deadline = Date
     const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, remaining));
     let retryAfter;
     try {
-      const target = new URL(url);
-      const response = await globalThis.fetch(target, { ...options(), signal: controller.signal });
+      const response = await globalThis.fetch(new URL(url), { ...options(), signal: controller.signal });
       if (response.status === 429) {
         // rate limits are absorbed here so the agent never has to handle them
         const seconds = Number(response.headers.get('Retry-After') ?? 2);
         retryAfter = Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 2000, 60000);
         await response.body?.cancel();
         if (Date.now() + retryAfter > deadline)
-          throw Object.assign(new CliError(`${target.pathname} rate limited (HTTP 429), try again later`), {
+          throw Object.assign(new CliError('messaging service rate limited (HTTP 429), try again later'), {
             status: 429,
           });
       } else {
         if (!response.ok) {
-          const detail = await response.text().catch(() => '');
-          throw Object.assign(
-            new CliError(`${target.pathname} HTTP ${response.status}: ${clean(detail.slice(0, 200))}`),
-            { status: response.status },
-          );
+          await response.body?.cancel().catch(() => {});
+          throw Object.assign(new CliError(`messaging service returned HTTP ${response.status}`), {
+            status: response.status,
+          });
         }
         try {
           return await response.json();
         } catch {
-          throw new CliError(`${target.pathname} returned invalid JSON`);
+          throw new CliError('messaging service returned invalid JSON');
         }
       }
     } catch (error) {
-      throw cliError(error);
+      throw cliError(error, 'messaging service request failed');
     } finally {
       clearTimeout(timer);
     }
@@ -481,7 +476,7 @@ async function dequeue(key, handOver, deadline) {
     if (corrupt.has(file)) {
       const destination = path.join(sessionDir(key), `queue.jsonl.corrupt.${randomBytes(16).toString('hex')}`);
       fs.renameSync(file, destination);
-      process.stderr.write(`${new CliError(`corrupt queue preserved at ${destination}`).message}\n`);
+      process.stderr.write(`${new CliError(`corrupt queue preserved as ${path.basename(destination)}`).message}\n`);
     } else fs.unlinkSync(file);
   }
 }
@@ -516,15 +511,20 @@ async function replayRecovery(held, deadline) {
     if (!held()) return false;
     if (Date.now() >= deadline) throw new CliError('recovery deadline elapsed');
     const file = path.join(recoveryDir, name);
-    const batch = JSON.parse(fs.readFileSync(file, 'utf8'));
+    let batch;
+    try {
+      batch = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
     if (
-      !Array.isArray(batch.targets) ||
+      !Array.isArray(batch?.targets) ||
       !batch.targets.every(
         target =>
           Array.isArray(target) && target.length === 2 && /^[a-f0-9]{16}$/.test(target[0]) && Array.isArray(target[1]),
       )
     )
-      throw new CliError(`invalid recovery batch ${file}`);
+      throw new CliError(`invalid recovery batch ${name}`);
     appendHistory(batch.targets.flatMap(([, items]) => items));
     for (const [target, items] of batch.targets) {
       if (!held() || !(await enqueue(target, items, held, deadline)) || !held()) return false;
