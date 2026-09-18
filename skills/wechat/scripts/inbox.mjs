@@ -3,18 +3,19 @@ import { CliError, drain, formatInbox, loadConfig } from './_lib.mjs';
 
 async function main() {
   const { values } = parseArgs({
-    options: { wait: { type: 'string' } },
+    options: { wait: { type: 'string' }, title: { type: 'string' } },
     allowPositionals: false,
     strict: true,
   });
   const waitSec = values.wait === undefined ? 0 : Number(values.wait);
   if (values.wait !== undefined && (!Number.isInteger(waitSec) || waitSec < 1)) {
-    throw new CliError('wechat: usage: inbox.mjs [--wait SEC]', 1);
+    throw new CliError('wechat: usage: inbox.mjs [--wait SEC] [--title T]', 1);
   }
   const cfg = loadConfig();
   let printed = false;
   await drain(cfg, {
     waitSec,
+    title: values.title ?? '',
     onItems: items =>
       new Promise(resolve => {
         process.stdout.write(`${printed ? '---\n' : ''}${formatInbox(items)}`, resolve);

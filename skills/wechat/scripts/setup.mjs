@@ -1,7 +1,6 @@
-import fs from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { CliError, drain, loadState, login, paths, saveConfig, saveState, sendText } from './_lib.mjs';
+import { CliError, drain, loadState, login, paths, resetState, saveConfig, sendText } from './_lib.mjs';
 import { qrMatrix, renderQr } from './_qr.mjs';
 
 async function main() {
@@ -17,8 +16,7 @@ async function main() {
         console.log(`If the QR code above is not scannable, open this URL in a browser and scan it there:\n${url}\n`);
       },
     });
-    fs.rmSync(paths().lockFile, { force: true });
-    saveState({ cursor: '', contextToken: '' });
+    resetState();
     const cfg = { ...creds };
     console.log(
       `Logged in (bot ${cfg.botId}). Now send the bot any message in WeChat \u2014 it appears as a new chat there.`,
