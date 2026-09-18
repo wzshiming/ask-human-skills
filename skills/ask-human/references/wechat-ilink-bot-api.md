@@ -4,7 +4,7 @@
 
 - `co-pine/wx-robot-ilink`: `src/weixin/{auth,api,types}.ts`.
 - `@tencent-weixin/openclaw-weixin` 2.4.8: `src/api/api.ts`, `src/auth/login-qr.ts`, `src/monitor/monitor.ts`, `src/messaging/{send,inbound}.ts`, README "Backend API Protocol".
-- Local behavior: `../scripts/_lib.mjs`. These are client-derived protocol notes, not a server compatibility guarantee.
+- Local behavior: `../scripts/_wechat.mjs` (protocol) on top of `../scripts/_lib.mjs` (shared core). These are client-derived protocol notes, not a server compatibility guarantee.
 
 ## Login (QR)
 
@@ -82,7 +82,7 @@ Response: { ret, errmsg? }
 
 - `ret: 0` indicates success; nonzero `ret` or `errcode` is an API failure.
 - `ret: -14`, `errcode: -14`, or HTTP `401` means a stale/revoked bot token: ask the human to re-run setup.
-- API errors become one-line stderr messages prefixed `wechat: `; stale tokens exit `1` with `wechat: bot token expired or revoked — run setup.mjs again`. The bot token is redacted from any echoed response text.
+- API errors become one-line stderr messages prefixed `ask-human: `; stale tokens exit `1` with `ask-human: bot token expired or revoked — run: node <skill-dir>/scripts/setup.mjs wechat`. The bot token is redacted from any echoed response text.
 - Long-polling is roughly 35 seconds; updates may return `longpolling_timeout_ms`.
 - Text is limited to 4000 characters per message. The client counts JavaScript UTF-16 code units, prefers line/word splits, and avoids splitting surrogate pairs on hard cuts.
 - HTTP `429` is retried honoring numeric `Retry-After` seconds (default 2, capped at 60 per retry) until the call's deadline: the `--wait` window, 5 seconds for an inbox without `--wait`, or 10 minutes per `notify` part. HTTP-date `Retry-After` is not parsed.

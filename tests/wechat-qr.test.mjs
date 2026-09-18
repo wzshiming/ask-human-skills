@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { qrMatrix, renderQr } = await import(new URL('../skills/wechat/scripts/_qr.mjs', import.meta.url));
+const { qrMatrix, renderQr } = await import(new URL('../skills/ask-human/scripts/_qr.mjs', import.meta.url));
 
 // Generated: mkdir -p /tmp/qrfix && cd /tmp/qrfix && npm init -y >/dev/null && npm i qrcode@1 --silent && node gen.mjs > fixtures.jsonl (byte mode, L, mask 0).
 const fixtures = [
